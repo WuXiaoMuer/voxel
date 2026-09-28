@@ -656,3 +656,9 @@ and dotting it with the outward direction. Godot's front faces wind **clockwise 
 from outside**, so the reference mesh comes out all-inward; if our cube does not
 match, every visible face would be back-face culled and you would only see the
 insides of the terrain. That is exactly the kind of bug a screenshot can hide.
+
+## License
+
+VoxelCraft is free software, released under the **GNU General Public License v3.0** —
+see [`LICENSE`](LICENSE). You may use, study, share and modify it, but anything you
+redistribute has to carry its source under the same licence.

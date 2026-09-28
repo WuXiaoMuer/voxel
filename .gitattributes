@@ -1,2 +1,14 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Line endings: LF in the working tree everywhere — Godot writes LF, and it keeps
+# diffs identical on Windows and Linux. The exception is Windows batch scripts,
+# which cmd.exe wants as CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Binary assets — never diffed, never line-ending converted.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.exe   binary
+*.pck   binary
+*.zip   binary

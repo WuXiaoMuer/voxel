@@ -492,3 +492,8 @@ Godot.exe --path . -- --capture-world  --capture-dir=E:/gdot/minecraft/previews
 `--winding` 值得一提：它通过取每个三角形的叉积并与向外方向点乘，比较内置 `BoxMesh` 与我们生成的
 网格的三角形绕序。Godot 的正面是**从外侧看顺时针**绕序，所以参照网格全部朝内；如果我们的立方体
 不匹配，每个可见面都会被背面剔除，你就只能看到地形的内部。这正是截图能够掩盖的那类 bug。
+
+## 许可证
+
+VoxelCraft 是自由软件，以 **GNU 通用公共许可证第 3 版（GPLv3）** 发布 —— 见 [`LICENSE`](LICENSE)。
+你可以使用、研究、分享和修改它，但你再分发的任何版本都必须以相同的许可证提供源码。
