@@ -1,8 +1,17 @@
 # VOXELCRAFT
 
+![VoxelCraft — a complete 3D voxel sandbox in Godot 4.5](assets/banner.png)
+
 A complete 3D voxel sandbox in the spirit of **Minecraft**, built with **Godot 4.5**
 (Forward+ renderer). Dig, build, explore infinite procedural terrain, survive the
 night, and craft your way from a bare fist to a stack of torches.
+
+## Screenshots
+
+![VoxelCraft screenshots](assets/features.png)
+
+Full-resolution promo frames are in `assets/screenshots/` (English and Chinese). The
+raw output of the verification capture pass is in `previews/`.
 
 
 ## Run it
@@ -396,6 +405,11 @@ scripts/
   ui.gd                  title / create / worlds / settings / pause / death screens
   main.gd                state machine, world lifecycle, saves, verification harness
 previews/                screenshots produced by the capture pass
+assets/                  brand assets: icon set, banners, promo frames
+  icon/                  the app icon at 16…1024 px, plus .ico for Windows
+  screenshots/           promo frames built from previews/ (en + zh)
+tools/
+  make_brand_assets.py   regenerates everything under assets/ from code
 export_presets.cfg       the Windows Desktop export preset (UTF-8, no BOM!)
 build_exe.bat            exports a self-contained build\VoxelCraft.exe
 run_game.bat             runs the project from source
@@ -403,6 +417,26 @@ open_editor.bat          opens it in the Godot editor
 MULTIPLAYER.md           design document for netplay (plan only, not implemented)
 build/                   export output; not part of the project, safe to delete
 ```
+
+## Brand assets
+
+Everything under `assets/` is drawn by `tools/make_brand_assets.py` — the same rule
+the game itself follows, so there is no external art to go missing and the icon can
+be re-rendered at any size or in any palette:
+
+```
+python tools/make_brand_assets.py --all        # icon set, banners, promo frames
+python tools/make_brand_assets.py --icon --variant deep
+python tools/make_brand_assets.py --social --banner
+python tools/make_brand_assets.py --shots
+```
+
+`--variant` picks the icon's look: `deep` (night sky), `sky` (daylight) or `stack`
+(a grass/dirt/stone totem). It needs Pillow and nothing else.
+
+`icon.svg` at the project root is the same cube as real vector art — it is what
+`project.godot` points at for the editor and window icon, and the Windows export
+preset uses `assets/icon/voxelcraft_deep_256.png` for the executable's own icon.
 
 ## Technical notes
 

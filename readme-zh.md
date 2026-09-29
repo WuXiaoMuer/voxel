@@ -1,7 +1,15 @@
 # VOXELCRAFT
 
+![VoxelCraft —— 用 Godot 4.5 从零代码搭建的 3D 体素沙盒](assets/banner_zh.png)
+
 一个完整的 3D 体素沙盒，风格向 **Minecraft** 致敬，使用 **Godot 4.5**（Forward+ 渲染器）构建。
 挖掘、建造、探索无限的程序化地形、在夜晚求生，并靠合成从赤手空拳一路做到一整叠火把。
+
+## 截图
+
+![VoxelCraft 截图](assets/features_zh.png)
+
+完整尺寸的宣传图在 `assets/screenshots/`（中英两套），验证截图流程的原始输出在 `previews/`。
 
 
 ## 运行
@@ -316,6 +324,11 @@ scripts/
   ui.gd                  标题 / 创建 / 世界列表 / 设置 / 暂停 / 死亡界面
   main.gd                状态机、世界生命周期、存档、验证测试框架
 previews/                由截图流程产生的截图
+assets/                  品牌素材：图标套件、横幅、宣传图
+  icon/                  16…1024 px 的应用图标，以及 Windows 用的 .ico
+  screenshots/           基于 previews/ 制作的宣传图（中英两套）
+tools/
+  make_brand_assets.py   用代码重新生成 assets/ 下的一切
 export_presets.cfg       Windows Desktop 导出预设（UTF-8，无 BOM！）
 build_exe.bat            导出自包含的 build\VoxelCraft.exe
 run_game.bat             从源码运行工程
@@ -323,6 +336,24 @@ open_editor.bat          在 Godot 编辑器中打开它
 MULTIPLAYER.md           联机设计文档（仅规划，未实现）
 build/                   导出输出；不属于工程，可安全删除
 ```
+
+## 品牌素材
+
+`assets/` 下的一切都由 `tools/make_brand_assets.py` 画出来 —— 和游戏本体遵循同一条规则，
+所以不存在"外部美术资源丢失"这回事，图标也能随时以任意尺寸、任意配色重新渲染：
+
+```
+python tools/make_brand_assets.py --all        # 图标套件、横幅、宣传图
+python tools/make_brand_assets.py --icon --variant deep
+python tools/make_brand_assets.py --social --banner
+python tools/make_brand_assets.py --shots
+```
+
+`--variant` 决定图标长相：`deep`（夜空）、`sky`（白天）或 `stack`（草/土/石方块柱）。
+只依赖 Pillow。
+
+工程根目录的 `icon.svg` 是同一个方块的真矢量版本 —— `project.godot` 指向它，用作编辑器
+与窗口图标；Windows 导出预设则用 `assets/icon/voxelcraft_deep_256.png` 作为可执行文件图标。
 
 ## 技术说明
 
