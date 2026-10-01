@@ -23,6 +23,10 @@ Settings="*res://scripts/settings.gd"
 Sfx="*res://scripts/sfx.gd"
 Commands="*res://scripts/commands.gd"
 
+[accessibility]
+
+general/accessibility_support=2
+
 [display]
 
 window/size/viewport_width=1280
