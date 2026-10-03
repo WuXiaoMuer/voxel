@@ -227,6 +227,40 @@ const ZH := {
 	"An indicator. Lights up when powered.": "指示灯。通电时亮起。",
 	"An actuator. Powered, it shoves the block in front one cell on.":
 		"执行器。通电时把前方的方块向前推动一格。",
+	# ---- new interaction blocks, crops and gear
+	"Furnace": "熔炉",
+	"Farmland": "耕地",
+	"Wheat Crop": "小麦（生长中）",
+	"Wheat": "小麦",
+	"CHEST": "箱子",
+	"FURNACE": "熔炉",
+	"ARMOUR": "护甲",
+	"A furnace. Smelt ores into ingots and cook food with fuel.":
+		"熔炉。用燃料把矿石炼成锭、把食物烤熟。",
+	"Tilled soil. Plant seeds on it and they grow into wheat.":
+		"翻好的土。把种子种上去就会长成小麦。",
+	"Growing wheat. It ripens in stages — harvest only when golden.":
+		"生长中的小麦。分阶段成熟——变金黄后再收割。",
+	"Ripe wheat. Harvest it for wheat and more seeds.": "成熟的小麦。收割可得小麦和更多种子。",
+	"Wooden Pickaxe": "木镐", "Wooden Axe": "木斧", "Wooden Shovel": "木锹",
+	"Wooden Sword": "木剑", "Wooden Hoe": "木锄",
+	"Stone Pickaxe": "石镐", "Stone Axe": "石斧", "Stone Shovel": "石锹",
+	"Stone Sword": "石剑", "Stone Hoe": "石锄",
+	"Iron Pickaxe": "铁镐", "Iron Axe": "铁斧", "Iron Shovel": "铁锹",
+	"Iron Sword": "铁剑", "Iron Hoe": "铁锄",
+	"Diamond Pickaxe": "钻石镐", "Diamond Axe": "钻石斧", "Diamond Shovel": "钻石锹",
+	"Diamond Sword": "钻石剑", "Diamond Hoe": "钻石锄",
+	"Leather Cap": "皮革帽", "Leather Tunic": "皮革上衣",
+	"Leather Pants": "皮革裤子", "Leather Boots": "皮革靴子",
+	"Iron Helmet": "铁头盔", "Iron Chestplate": "铁胸甲",
+	"Iron Leggings": "铁护腿", "Iron Boots": "铁靴子",
+	"Diamond Helmet": "钻石头盔", "Diamond Chestplate": "钻石胸甲",
+	"Diamond Leggings": "钻石护腿", "Diamond Boots": "钻石靴子",
+	"Rotten Flesh": "腐肉", "Bone": "骨头", "Arrow": "箭", "String": "线",
+	"Gunpowder": "火药", "Seeds": "种子", "Leather": "皮革", "Feather": "羽毛",
+	"Raw Porkchop": "生猪排", "Cooked Porkchop": "熟猪排",
+	"Raw Beef": "生牛肉", "Steak": "牛排",
+	"Raw Chicken": "生鸡肉", "Cooked Chicken": "熟鸡肉",
 }
 
 

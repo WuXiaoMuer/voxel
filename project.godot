@@ -22,6 +22,7 @@ I18n="*res://scripts/i18n.gd"
 Settings="*res://scripts/settings.gd"
 Sfx="*res://scripts/sfx.gd"
 Commands="*res://scripts/commands.gd"
+Gear="*res://scripts/gear.gd"
 
 [accessibility]
 

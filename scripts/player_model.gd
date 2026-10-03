@@ -108,8 +108,41 @@ func _ready() -> void:
 	held.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 	arm_r.add_child(held)
 
+	# a tool in the same hand: a wooden shaft with a small head that changes colour and
+	# shape with the material and the kind of tool
+	held_tool = Node3D.new()
+	held_tool.visible = false
+	arm_r.add_child(held_tool)
+	var shaft := MeshInstance3D.new()
+	var sb := BoxMesh.new()
+	sb.size = Vector3(0.045, 0.52, 0.045)
+	shaft.mesh = sb
+	var sm := StandardMaterial3D.new()
+	sm.albedo_color = Color(0.45, 0.30, 0.15)
+	sm.roughness = 1.0
+	sm.metallic = 0.0
+	shaft.material_override = sm
+	shaft.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	shaft.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	held_tool.add_child(shaft)
+	held_head = MeshInstance3D.new()
+	var hbm := BoxMesh.new()
+	hbm.size = Vector3(0.20, 0.10, 0.06)
+	held_head.mesh = hbm
+	held_head.position = Vector3(0, 0.28, 0)
+	var hm2 := StandardMaterial3D.new()
+	hm2.albedo_color = Color(0.7, 0.7, 0.7)
+	hm2.roughness = 0.8
+	hm2.metallic = 0.3
+	held_head.material_override = hm2
+	held_head.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	held_head.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	held_tool.add_child(held_head)
+
 
 var held: MeshInstance3D
+var held_tool: Node3D
+var held_head: MeshInstance3D
 
 
 ## Shows a small copy of `id` in the right hand. Pass 0 to hide it. Kept in sync by
@@ -117,6 +150,8 @@ var held: MeshInstance3D
 func set_held_block(id: int) -> void:
 	if held == null:
 		return
+	if held_tool != null:
+		held_tool.visible = false
 	if id <= 0 or not Blocks.is_block_item(id):
 		held.visible = false
 		held.mesh = null
@@ -128,6 +163,41 @@ func set_held_block(id: int) -> void:
 	# so +x is outward.
 	held.position = Vector3(0.05, -0.72, -0.17)
 	held.visible = true
+
+
+## Shows a small tool in the right hand: the head's colour follows the material tier and
+## the shape follows the tool kind. Pass 0 (or any non-tool) to hide it.
+func set_held_item(id: int) -> void:
+	if held_tool == null:
+		return
+	if id <= 0 or not Gear.is_tool(id):
+		# only the tool is ours to hide: the block hand is set_held_block's to clear
+		held_tool.visible = false
+		return
+	if held != null:
+		held.visible = false
+		held.mesh = null
+	var tier := Gear.tier_of(id)
+	var col := Color(0.62, 0.46, 0.26)
+	match tier:
+		1:
+			col = Color(0.60, 0.60, 0.63)
+		2:
+			col = Color(0.86, 0.86, 0.90)
+		3:
+			col = Color(0.36, 0.90, 0.92)
+	(held_head.material_override as StandardMaterial3D).albedo_color = col
+	# a pick/axe/shovel head is a wide block; a sword/hoe wants a flat blade
+	var kind := Gear.tool_kind(id)
+	var hb: BoxMesh = held_head.mesh
+	if kind == Gear.SWORD or kind == Gear.HOE:
+		hb.size = Vector3(0.06, 0.34, 0.04)
+		held_head.position = Vector3(0, 0.34, 0)
+	else:
+		hb.size = Vector3(0.22, 0.10, 0.06)
+		held_head.position = Vector3(0, 0.28, 0)
+	held_tool.position = Vector3(0.05, -0.72, -0.17)
+	held_tool.visible = true
 
 
 ## The skin rectangle each of a box's six faces samples, ordered top, bottom, -x,

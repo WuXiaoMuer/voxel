@@ -64,6 +64,18 @@ var craft_hint: Array = []
 var palette_slots: Array = []
 var palette_grid: GridContainer
 var pal_names := PackedStringArray()
+# chest / furnace overlay
+var _top_row: Control
+var _title_label: Label
+var _container_area: VBoxContainer
+var _cont_title: Label
+var _chest_grid: GridContainer
+var _furnace_grid: HBoxContainer
+var _container_slots: Array = []
+var _container_cells: Array = []
+var container_mode := 0            # 0 none, 1 chest, 2 furnace
+var container_pos := Vector3i(-9999, 0, 0)
+var armor_slots: Array = []
 
 var debug_visible := false
 var _item_label_t: float = 0.0
@@ -738,10 +750,12 @@ func _build_inventory() -> void:
 	var title := _lang_label("INVENTORY")
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(title)
+	_title_label = title
 
 	var top := HBoxContainer.new()
 	top.add_theme_constant_override("separation", 16)
 	vb.add_child(top)
+	_top_row = top
 
 	# --- crafting
 	var craft_col := VBoxContainer.new()
@@ -790,7 +804,15 @@ func _build_inventory() -> void:
 	hint_wrap.add_child(hint_head)
 	var hint_cols := HBoxContainer.new()
 	hint_cols.add_theme_constant_override("separation", 20)
-	hint_wrap.add_child(hint_cols)
+	# Bounded and scrollable: the hint list is one line per recipe, and the recipe table
+	# grew long enough that an unbounded list filled the whole panel and pushed the
+	# backpack and hotbar off the bottom of the screen.
+	var hint_scroll := ScrollContainer.new()
+	hint_scroll.custom_minimum_size = Vector2(360, 200)
+	hint_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	hint_scroll.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	hint_wrap.add_child(hint_scroll)
+	hint_scroll.add_child(hint_cols)
 	craft_hint = []
 	for c in 2:
 		var col := Label.new()
@@ -819,7 +841,7 @@ func _build_inventory() -> void:
 	palette_grid.add_theme_constant_override("v_separation", 6)
 	scroll.add_child(palette_grid)
 
-	for i in range(1, 48):
+	for i in range(1, 56):
 		if Blocks.defs[i] == null or i == Blocks.WATER:
 			continue
 		var sl := InvSlot.new()
@@ -831,9 +853,28 @@ func _build_inventory() -> void:
 		palette_slots.append(sl)
 		pal_names.append("")
 
-	# the pure items too, so food is reachable in creative mode
+	# the pure items too, so food, tools, armour and mob loot are reachable in creative
 	for id in [Blocks.ITEM_STICK, Blocks.ITEM_COAL, Blocks.ITEM_IRON, Blocks.ITEM_GOLD,
-			Blocks.ITEM_DIAMOND, Blocks.ITEM_COPPER, Blocks.ITEM_APPLE, Blocks.ITEM_BREAD]:
+			Blocks.ITEM_DIAMOND, Blocks.ITEM_COPPER, Blocks.ITEM_APPLE, Blocks.ITEM_BREAD,
+			Blocks.ITEM_WOOD_PICK, Blocks.ITEM_WOOD_AXE, Blocks.ITEM_WOOD_SHOVEL,
+			Blocks.ITEM_WOOD_SWORD, Blocks.ITEM_WOOD_HOE,
+			Blocks.ITEM_STONE_PICK, Blocks.ITEM_STONE_AXE, Blocks.ITEM_STONE_SHOVEL,
+			Blocks.ITEM_STONE_SWORD, Blocks.ITEM_STONE_HOE,
+			Blocks.ITEM_IRON_PICK, Blocks.ITEM_IRON_AXE, Blocks.ITEM_IRON_SHOVEL,
+			Blocks.ITEM_IRON_SWORD, Blocks.ITEM_IRON_HOE,
+			Blocks.ITEM_DIAMOND_PICK, Blocks.ITEM_DIAMOND_AXE, Blocks.ITEM_DIAMOND_SHOVEL,
+			Blocks.ITEM_DIAMOND_SWORD, Blocks.ITEM_DIAMOND_HOE,
+			Blocks.ITEM_LEATHER_HELMET, Blocks.ITEM_LEATHER_CHESTPLATE,
+			Blocks.ITEM_LEATHER_LEGGINGS, Blocks.ITEM_LEATHER_BOOTS,
+			Blocks.ITEM_IRON_HELMET, Blocks.ITEM_IRON_CHESTPLATE,
+			Blocks.ITEM_IRON_LEGGINGS, Blocks.ITEM_IRON_BOOTS,
+			Blocks.ITEM_DIAMOND_HELMET, Blocks.ITEM_DIAMOND_CHESTPLATE,
+			Blocks.ITEM_DIAMOND_LEGGINGS, Blocks.ITEM_DIAMOND_BOOTS,
+			Blocks.ITEM_SEEDS, Blocks.ITEM_WHEAT, Blocks.ITEM_ROTTEN_FLESH, Blocks.ITEM_BONE,
+			Blocks.ITEM_ARROW, Blocks.ITEM_STRING, Blocks.ITEM_GUNPOWDER, Blocks.ITEM_LEATHER,
+			Blocks.ITEM_FEATHER, Blocks.ITEM_PORKCHOP_RAW, Blocks.ITEM_PORKCHOP_COOKED,
+			Blocks.ITEM_BEEF_RAW, Blocks.ITEM_BEEF_COOKED,
+			Blocks.ITEM_CHICKEN_RAW, Blocks.ITEM_CHICKEN_COOKED]:
 		var it := InvSlot.new()
 		it.index = 300 + pal_names.size()
 		it.set_item(id, 64)
@@ -842,6 +883,58 @@ func _build_inventory() -> void:
 		palette_grid.add_child(it)
 		palette_slots.append(it)
 		pal_names.append("")
+
+	# --- armour
+	var arlab := _lang_label("ARMOUR")
+	vb.add_child(arlab)
+	var ab := HBoxContainer.new()
+	ab.add_theme_constant_override("separation", 2)
+	ab.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	vb.add_child(ab)
+	armor_slots.clear()
+	for i in 4:
+		var asl := InvSlot.new()
+		asl.index = 430 + i
+		asl.slot_pressed.connect(_on_inv_slot)
+		asl.hover_changed.connect(_on_slot_hover)
+		ab.add_child(asl)
+		armor_slots.append(asl)
+
+	# --- chest / furnace panel, shown in place of the crafting row
+	_container_area = VBoxContainer.new()
+	_container_area.add_theme_constant_override("separation", 4)
+	_container_area.visible = false
+	vb.add_child(_container_area)
+	_cont_title = _lang_label("CHEST")
+	_container_area.add_child(_cont_title)
+
+	_chest_grid = GridContainer.new()
+	_chest_grid.columns = 9
+	_chest_grid.add_theme_constant_override("h_separation", 2)
+	_chest_grid.add_theme_constant_override("v_separation", 2)
+	_chest_grid.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	_container_area.add_child(_chest_grid)
+	_container_slots.clear()
+	for i in 27:
+		var csl := InvSlot.new()
+		csl.index = 400 + i
+		csl.slot_pressed.connect(_on_inv_slot)
+		csl.hover_changed.connect(_on_slot_hover)
+		_chest_grid.add_child(csl)
+		_container_slots.append(csl)
+
+	_furnace_grid = HBoxContainer.new()
+	_furnace_grid.add_theme_constant_override("separation", 2)
+	_furnace_grid.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	_furnace_grid.visible = false
+	_container_area.add_child(_furnace_grid)
+	for i in 3:
+		var fsl := InvSlot.new()
+		fsl.index = 500 + i
+		fsl.slot_pressed.connect(_on_inv_slot)
+		fsl.hover_changed.connect(_on_slot_hover)
+		_furnace_grid.add_child(fsl)
+		_container_slots.append(fsl)
 
 	# --- inventory grid
 	var invlab := _lang_label("BACKPACK")
@@ -894,21 +987,82 @@ func is_inventory_open() -> bool:
 	return _inv_open
 
 
+## Open the 27-slot chest at `pos` (contents come from the container store).
+func open_chest(pos: Vector3i) -> void:
+	container_mode = 1
+	container_pos = pos
+	_container_cells = world.containers.chest_at(pos)
+	_apply_container_mode()
+	open_inventory(true)
+
+
+## Open the furnace at `pos`. Its three slots are live references into the furnace
+## dictionary, so moving an item in the grid updates what the furnace will smelt.
+func open_furnace(pos: Vector3i) -> void:
+	container_mode = 2
+	container_pos = pos
+	var f: Dictionary = world.containers.furnace_at(pos)
+	_container_cells = [f["input"], f["fuel"], f["output"]]
+	_apply_container_mode()
+	open_inventory(true)
+
+
+func close_container() -> void:
+	container_mode = 0
+	_container_cells = []
+	_apply_container_mode()
+
+
+func _apply_container_mode() -> void:
+	var showing := container_mode != 0
+	if _container_area != null:
+		_container_area.visible = showing
+	if _top_row != null:
+		_top_row.visible = not showing
+	if _chest_grid != null:
+		_chest_grid.visible = container_mode == 1
+	if _furnace_grid != null:
+		_furnace_grid.visible = container_mode == 2
+	if _cont_title != null:
+		_cont_title.text = I18n.t("CHEST" if container_mode == 1 else "FURNACE")
+	if _title_label != null:
+		_title_label.text = I18n.t("CHEST" if container_mode == 1 else ("FURNACE" if container_mode == 2 else "INVENTORY"))
+
+
 func refresh_inventory() -> void:
 	for i in 27:
 		var st: Dictionary = player.inventory[i]
 		inv_slots[i].set_item(int(st["id"]), int(st["count"]))
+		inv_slots[i].set_dur(_dur_of(st))
 	for i in 9:
 		var st2: Dictionary = player.hotbar[i]
 		inv_slots[27 + i].set_item(int(st2["id"]), int(st2["count"]))
+		inv_slots[27 + i].set_dur(_dur_of(st2))
 		inv_slots[27 + i].highlighted = i == player.selected
 		inv_slots[27 + i].queue_redraw()
 	for i in 9:
 		var st3: Dictionary = player.crafting[i]
 		craft_slots[i].set_item(int(st3["id"]), int(st3["count"]))
+	for i in 4:
+		var st4: Dictionary = player.armor[i]
+		armor_slots[i].set_item(int(st4["id"]), int(st4["count"]))
+		armor_slots[i].set_dur(_dur_of(st4))
+	for i in _container_cells.size():
+		if i < _container_slots.size():
+			var st5: Dictionary = _container_cells[i]
+			_container_slots[i].set_item(int(st5["id"]), int(st5["count"]))
+			_container_slots[i].set_dur(_dur_of(st5))
 	var res: Dictionary = player.craft_result()
 	result_slot.set_item(int(res["id"]), int(res["count"]))
 	_refresh_cursor()
+
+
+func _dur_of(st: Dictionary) -> float:
+	var id := int(st.get("id", 0))
+	var maxd := Gear.max_durability(id)
+	if maxd <= 0:
+		return -1.0
+	return float(st.get("dur", maxd)) / float(maxd)
 
 
 func _refresh_cursor() -> void:
@@ -932,6 +1086,14 @@ func _on_inv_slot(index: int, button: int) -> void:
 			Sfx.play("click", -12.0)
 			_refresh_cursor()
 		return
+
+	# the furnace output is take-only, and an armour slot only accepts its own piece
+	if index == 502 and int(player.cursor_stack["id"]) != 0:
+		return
+	if index >= 430 and index < 434:
+		var aid := int(player.cursor_stack["id"])
+		if aid != 0 and Gear.armor_slot(aid) != index - 430:
+			return
 
 	if index == 200:
 		var res: Dictionary = player.craft_result()
@@ -1008,6 +1170,12 @@ func _array_for(index: int):
 		return player.crafting
 	if index >= 0 and index < 27:
 		return player.inventory
+	if index >= 400 and index < 427:
+		return _container_cells if container_mode == 1 else null
+	if index >= 500 and index < 503:
+		return _container_cells if container_mode == 2 else null
+	if index >= 430 and index < 434:
+		return player.armor
 	return null
 
 
@@ -1016,4 +1184,10 @@ func _local_index(index: int) -> int:
 		return index - 50
 	if index >= 100 and index < 109:
 		return index - 100
+	if index >= 400 and index < 427:
+		return index - 400
+	if index >= 500 and index < 503:
+		return index - 500
+	if index >= 430 and index < 434:
+		return index - 430
 	return index

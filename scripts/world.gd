@@ -80,6 +80,48 @@ class Buf:
 		idx.append_array([b, b + 2, b + 1, b, b + 3, b + 2])
 
 
+	## A thin slab with real thickness: a door leaf or a ladder, like Minecraft's 3/16-block
+	## door. `axis` picks which horizontal direction is the thin one (0 = X, 1 = Z), `pos`
+	## is where the slab sits on that axis, and `thickness` is how thick it is. All six
+	## faces are emitted, so it reads as a solid plank from every angle instead of a sheet.
+	func panel(base: Vector3, r: Rect2, col: Color, axis: int, pos: float, thickness: float) -> void:
+		var h := thickness * 0.5
+		var lo := pos - h
+		var hi := pos + h
+		var faces: Array
+		if axis == 1:
+			faces = [
+				[Vector3(0, 0, hi), Vector3(1, 0, hi), Vector3(1, 1, hi), Vector3(0, 1, hi), Vector3(0, 0, 1)],
+				[Vector3(0, 0, lo), Vector3(1, 0, lo), Vector3(1, 1, lo), Vector3(0, 1, lo), Vector3(0, 0, -1)],
+				[Vector3(1, 0, lo), Vector3(1, 0, hi), Vector3(1, 1, hi), Vector3(1, 1, lo), Vector3(1, 0, 0)],
+				[Vector3(0, 0, hi), Vector3(0, 0, lo), Vector3(0, 1, lo), Vector3(0, 1, hi), Vector3(-1, 0, 0)],
+				[Vector3(0, 1, hi), Vector3(1, 1, hi), Vector3(1, 1, lo), Vector3(0, 1, lo), Vector3(0, 1, 0)],
+				[Vector3(0, 0, lo), Vector3(1, 0, lo), Vector3(1, 0, hi), Vector3(0, 0, hi), Vector3(0, -1, 0)],
+			]
+		else:
+			faces = [
+				[Vector3(hi, 0, 0), Vector3(hi, 0, 1), Vector3(hi, 1, 1), Vector3(hi, 1, 0), Vector3(1, 0, 0)],
+				[Vector3(lo, 0, 0), Vector3(lo, 0, 1), Vector3(lo, 1, 1), Vector3(lo, 1, 0), Vector3(-1, 0, 0)],
+				[Vector3(lo, 0, 1), Vector3(hi, 0, 1), Vector3(hi, 1, 1), Vector3(lo, 1, 1), Vector3(0, 0, 1)],
+				[Vector3(lo, 0, 0), Vector3(hi, 0, 0), Vector3(hi, 1, 0), Vector3(lo, 1, 0), Vector3(0, 0, -1)],
+				[Vector3(lo, 1, 1), Vector3(hi, 1, 1), Vector3(hi, 1, 0), Vector3(lo, 1, 0), Vector3(0, 1, 0)],
+				[Vector3(lo, 0, 0), Vector3(hi, 0, 0), Vector3(hi, 0, 1), Vector3(lo, 0, 1), Vector3(0, -1, 0)],
+			]
+		var quv := [Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0)]
+		for q in faces:
+			var nrm: Vector3 = q[4]
+			var b := v.size()
+			for i in 4:
+				var p: Vector3 = q[i]
+				v.append(p + base)
+				n.append(nrm)
+				var t: Vector2 = quv[i]
+				uv.append(r.position + Vector2(t.x * r.size.x, t.y * r.size.y))
+				c.append(col)
+			# the panel material is cull-disabled, so winding only needs to stay consistent
+			idx.append_array([b, b + 2, b + 1, b, b + 3, b + 2])
+
+
 ## A fresh vertex buffer. Exposed so tests can drive `_attach_mesh` directly.
 func new_buf() -> Buf:
 	return Buf.new()
@@ -97,6 +139,10 @@ var circuit
 ## pos -> tile id, for blocks whose *look* changes without their id changing: a
 ## switch that has been flipped, a lamp that has lit up, a wire that has gone live.
 var tile_override: Dictionary = {}
+## pos -> Vector3i, which way a thin panel (a door leaf, a ladder) faces. Written when
+## the panel is placed, from where the placer was looking, so the mesher can thin it
+## along the right axis instead of drawing a cube.
+var facing_override: Dictionary = {}
 ## pos -> bool, the lit state of lamps and piston arms, read when placing lights.
 var circuit_lit: Dictionary = {}
 
@@ -221,13 +267,17 @@ func setup(s: int, distance: int) -> void:
 	perf_gen_max = 0
 	perf_gen_chunks = 0
 	render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
-	# One job per worker thread, so the pool is never the bottleneck. Capped because
-	# every in-flight job holds its section's vertex buffers until it lands.
-	max_jobs = clampi(OS.get_processor_count() - 1, 6, 32)
-	# Half the pool generates, the rest keeps meshing. Meshing has to keep up with
-	# generation or a chunk appears with no mesh on it, and it is the cheaper of the two:
-	# a column costs ~110ms while a section costs a few.
-	max_gen_jobs = clampi(OS.get_processor_count() / 2, 2, 8)
+	# Deliberately *below* the core count. This pool scales negatively: every in-flight
+	# job holds its own noise objects and vertex buffers, and once enough of them run at
+	# once the allocator and the memory bus thrash badly enough that the pool does less
+	# work per second the more threads it is given. Measured on a 24-thread machine
+	# streaming a render distance of 4: 31 jobs took 21.1s, 12 took 8.1s, 9 took 6.3s,
+	# 6 took 7.3s. The generators' own fill_chunk is ~13ms of work, yet it wall-clocked at
+	# 364ms under 31 jobs and 32ms under 9 -- the threads were not the limit, contention
+	# was. Nine jobs is the sweet spot, so the caps are a contention limit, not a
+	# parallelism one, and they do not simply follow the core count.
+	max_jobs = clampi(OS.get_processor_count() / 4, 4, 8)
+	max_gen_jobs = clampi(OS.get_processor_count() / 8, 2, 3)
 	ensure_circuit()
 	# Guarded rather than unconditional: `setup` runs again on every world load, and
 	# without this the light pool grew by 14 nodes per load and the old ones were
@@ -264,6 +314,7 @@ func reset() -> void:
 	edits_by_chunk.clear()
 	torches.clear()
 	tile_override.clear()
+	facing_override.clear()
 	circuit_lit.clear()
 	for l in _lights:
 		if is_instance_valid(l):
@@ -363,8 +414,12 @@ func highest_occluder(x: int, z: int) -> int:
 ## reconciles when the answer arrives -- and nothing outside these two methods has
 ## to know which one is installed.
 signal block_changed(pos: Vector3i, id: int)
+signal container_opened(pos: Vector3i)
+signal furnace_opened(pos: Vector3i)
+signal table_opened(pos: Vector3i)
 
 var authority = null
+var containers = null       # the chest/furnace store, injected by main
 
 
 class Authority:
@@ -396,6 +451,60 @@ func set_block(x: int, y: int, z: int, id: int, record: bool = true,
 	return authority.request_edit(self, Vector3i(x, y, z), id, record, silent)
 
 
+## The single right-click dispatch: doors toggle, a chest or furnace asks the UI to
+## open, and everything else falls through to the circuit solver. Returns true when the
+## click was consumed (so the player does not then try to place a block).
+func interact_block(pos: Vector3i, id: int) -> bool:
+	match id:
+		Blocks.DOOR, Blocks.DOOR_OPEN:
+			_toggle_door(pos)
+			return true
+		Blocks.CHEST:
+			if containers != null:
+				containers.chest_at(pos)
+			container_opened.emit(pos)
+			return true
+		Blocks.FURNACE, Blocks.FURNACE_LIT:
+			if containers != null:
+				containers.furnace_at(pos)
+			furnace_opened.emit(pos)
+			return true
+		Blocks.CRAFTING_TABLE:
+			table_opened.emit(pos)
+			return true
+	if circuit != null:
+		return circuit.interact(pos, id)
+	return false
+
+
+## A door is two blocks tall and swings on its hinge. Opening turns the leaf a quarter
+## turn — the mesher thins the panel along the new axis, so it lies along the wall you
+## walked through — and closing turns it back. Both halves turn together.
+func _toggle_door(pos: Vector3i) -> void:
+	var opening := get_block(pos.x, pos.y, pos.z) == Blocks.DOOR
+	var new_id := Blocks.DOOR_OPEN if opening else Blocks.DOOR
+	var cells: Array = [pos]
+	for dy in [-1, 1]:
+		var nb := Vector3i(pos.x, pos.y + dy, pos.z)
+		if _is_door(get_block(nb.x, nb.y, nb.z)):
+			cells.append(nb)
+	for c in cells:
+		var cur: Vector3i = facing_override.get(c, _panel_facing())
+		facing_override[c] = _rotate_quarter(cur, opening)
+		set_block(c.x, c.y, c.z, new_id)
+
+
+func _is_door(id: int) -> bool:
+	return id == Blocks.DOOR or id == Blocks.DOOR_OPEN
+
+
+## A quarter turn of a horizontal facing about the vertical axis: +X -> -Z -> -X -> +Z.
+func _rotate_quarter(d: Vector3i, ccw: bool) -> Vector3i:
+	if ccw:
+		return Vector3i(-d.z, 0, d.x)
+	return Vector3i(d.z, 0, -d.x)
+
+
 ## The actual mutation: the only place a chunk's blocks change outside worldgen.
 ## Called by the authority, never by callers directly.
 ##
@@ -424,8 +533,14 @@ func apply_edit(pos: Vector3i, id: int, record: bool = true, silent: bool = fals
 	# a plant floating on top of the removed block goes away too. Applied directly
 	# rather than re-requested: it is a consequence of this one change, so a remote
 	# authority should ship it as part of the same edit, not as a second request.
-	if id == Blocks.AIR and Blocks.kind[get_block(x, y + 1, z)] == Blocks.K_CROSS:
-		apply_edit(Vector3i(x, y + 1, z), Blocks.AIR, record, silent)
+	if id == Blocks.AIR:
+		# a plant resting on the removed block goes with it, and so does the other half
+		# of a two-tall door
+		var above := get_block(x, y + 1, z)
+		if Blocks.kind[above] == Blocks.K_CROSS or _is_door(above):
+			apply_edit(Vector3i(x, y + 1, z), Blocks.AIR, record, silent)
+		if _is_door(get_block(x, y - 1, z)):
+			apply_edit(Vector3i(x, y - 1, z), Blocks.AIR, record, silent)
 
 	blocks[idx] = id
 	ch["sections"][sec] = blocks
@@ -452,6 +567,15 @@ func apply_edit(pos: Vector3i, id: int, record: bool = true, silent: bool = fals
 		tile_override.erase(pos)
 	if not _tile_can_change(old):
 		tile_override.erase(pos)
+
+	# a thin panel remembers which way it faces. A fresh placement takes it from where
+	# the placer looked; a door being opened or closed keeps the one it has, because the
+	# toggle has already written the rotated direction it wants.
+	if Blocks.kind[id] == Blocks.K_PANEL:
+		if not facing_override.has(pos) or Blocks.kind[old] != Blocks.K_PANEL:
+			facing_override[pos] = _panel_facing()
+	else:
+		facing_override.erase(pos)
 
 	# keep the circuit solver's picture of the world in step, then let it re-solve
 	# around this position. Never from a silent write: that write came *from* the
@@ -488,6 +612,18 @@ func _facing_for_place(pos: Vector3i, id: int) -> Vector3i:
 	if look.length_squared() < 0.0001:
 		return Vector3i(0, 0, 1)
 	return circuit.facing_from_look(look)
+
+
+## Which way a thin panel is placed: the placer's look snapped to the nearest horizontal
+## axis, so a door you place facing north has its leaf across the east-west axis. Falls
+## back to +Z when there is no look (a load, or a test).
+func _panel_facing() -> Vector3i:
+	var look := _place_look
+	if look.length_squared() < 0.0001:
+		return Vector3i(0, 0, 1)
+	if absf(look.x) >= absf(look.z):
+		return Vector3i(1 if look.x > 0.0 else -1, 0, 0)
+	return Vector3i(0, 0, 1 if look.z > 0.0 else -1)
 
 
 ## Set by the player just before placing, so the world knows which way the placer
@@ -1026,7 +1162,8 @@ func _make_payload(c: Vector2i, sec: int) -> Dictionary:
 			var cc := Vector2i(c.x + dx, c.y + dz)
 			hm.append(chunks[cc]["hmap"] if chunks.has(cc) else null)
 	return {"c": c, "sec": sec, "nb": nb, "hm": hm,
-		"srev": int(chunks[c]["srev"].get(sec, 0)), "tiles": _local_tiles(c, sec)}
+		"srev": int(chunks[c]["srev"].get(sec, 0)), "tiles": _local_tiles(c, sec),
+		"facing": _local_facing(c, sec)}
 
 
 ## The tile overrides that fall inside one section, keyed by section-local position.
@@ -1046,6 +1183,23 @@ func _local_tiles(c: Vector2i, sec: int) -> Dictionary:
 		if (pos.y >> 4) != sec:
 			continue
 		out[Vector3i(pos.x - x0, pos.y & 15, pos.z - z0)] = int(tile_override[pos])
+	return out
+
+
+## The panel facings that fall inside one section, keyed by section-local position, for
+## the same reason the tiles are: the worker must never read the live dictionary.
+func _local_facing(c: Vector2i, sec: int) -> Dictionary:
+	var out: Dictionary = {}
+	if facing_override.is_empty():
+		return out
+	var x0 := c.x << 4
+	var z0 := c.y << 4
+	for pos in facing_override.keys():
+		if pos.x < x0 or pos.x >= x0 + CHUNK or pos.z < z0 or pos.z >= z0 + CHUNK:
+			continue
+		if (pos.y >> 4) != sec:
+			continue
+		out[Vector3i(pos.x - x0, pos.y & 15, pos.z - z0)] = facing_override[pos]
 	return out
 
 
@@ -1088,6 +1242,7 @@ func _mesh_job(p: Dictionary) -> void:
 	var oy: int = sec * SEC
 	var bufs := [Buf.new(), Buf.new(), Buf.new(), Buf.new(), Buf.new()]
 	var tiles: Dictionary = p["tiles"]
+	var facings: Dictionary = p.get("facing", {})
 	# Local aliases for the tables this loop hammers. Reading them off `self` is fine, but
 	# a local is one less indirection in the innermost of the 4096 iterations.
 	var occ_tab := _t_occluder
@@ -1119,6 +1274,25 @@ func _mesh_job(p: Dictionary) -> void:
 					bufs[4].plate(Vector3(lx, ly, lz),
 						_tile_rect(_tile_of(tiles, lx, ly, lz, id)),
 						Color(lit, lit, lit))
+					continue
+				if k == Blocks.K_PANEL:
+					# a thin slab with real thickness (Minecraft's door is 3/16 of a
+					# block). It is thinned along the axis it faces and pushed against
+					# the wall for a ladder; a door leaf sits through the cell.
+					var plit := col_light
+					if emit_tab[id] > 0:
+						plit = 1.0
+					var fd: Vector3i = facings.get(Vector3i(lx, ly, lz), Vector3i(0, 0, 1))
+					var axis := 1
+					var comp := float(fd.z)
+					if fd.x != 0:
+						axis = 0
+						comp = float(fd.x)
+					# flush to the edge the panel faces, like Minecraft's door and ladder
+					var plane := 0.5 + 0.40 * comp
+					bufs[3].panel(Vector3(lx, ly, lz),
+						_tile_rect(_tile_of(tiles, lx, ly, lz, id, _t_tile_top[id])),
+						Color(plit, plit, plit), axis, plane, 0.1875)
 					continue
 				var buf: Buf = bufs[k]
 				var lpos := Vector3(lx, ly, lz)
@@ -1580,3 +1754,37 @@ func load_edits(buf: PackedByteArray) -> void:
 		var ebc: Dictionary = edits_by_chunk.get(c, {})
 		ebc[pos] = id
 		edits_by_chunk[c] = ebc
+
+
+## Which way each thin panel faces is not derivable from the block ids, so it gets its
+## own small file, the way circuit state does. 16 bytes an entry: pos + a signed direction.
+func serialize_facing() -> PackedByteArray:
+	var buf := PackedByteArray()
+	var n := facing_override.size()
+	buf.resize(4 + n * 16)
+	buf.encode_s32(0, n)
+	var i := 0
+	for pos in facing_override.keys():
+		var off := 4 + i * 16
+		buf.encode_s32(off, pos.x)
+		buf.encode_s32(off + 4, pos.y)
+		buf.encode_s32(off + 8, pos.z)
+		var f: Vector3i = facing_override[pos]
+		buf.encode_s8(off + 12, f.x)
+		buf.encode_s8(off + 13, f.y)
+		buf.encode_s8(off + 14, f.z)
+		i += 1
+	return buf
+
+
+func load_facing(buf: PackedByteArray) -> void:
+	if buf.size() < 4:
+		return
+	var n := buf.decode_s32(0)
+	for i in n:
+		var off := 4 + i * 16
+		if off + 16 > buf.size():
+			break
+		var pos := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
+		facing_override[pos] = Vector3i(buf.decode_s8(off + 12), buf.decode_s8(off + 13),
+			buf.decode_s8(off + 14))

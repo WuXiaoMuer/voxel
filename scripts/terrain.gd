@@ -144,7 +144,14 @@ func humidity_at(wx: int, wz: int) -> float:
 
 
 func biome_at(wx: int, wz: int) -> int:
-	var h := height_at(wx, wz)
+	return biome_from_height(wx, wz, height_at(wx, wz))
+
+
+## The biome, when the caller has already sampled the height. `fill_chunk` needs both for
+## every column of its heightfield cache, and `biome_at` would otherwise evaluate the three
+## `height_at` noise samples a second time -- a third of the generator's height cost, spent
+## twice, in its hottest loop.
+func biome_from_height(wx: int, wz: int, h: int) -> int:
 	if h > 62:
 		return B_MOUNTAIN
 	if h < SEA - 1:
@@ -359,7 +366,7 @@ func fill_chunk(cx: int, cz: int) -> Dictionary:
 			var wz := oz + ez - M
 			var hv := height_at(wx, wz)
 			hcache[ex + ez * EW] = hv
-			bcache[ex + ez * EW] = biome_at(wx, wz)
+			bcache[ex + ez * EW] = biome_from_height(wx, wz, hv)
 			tallest = maxi(tallest, hv)
 
 	# Tall enough for the tallest canopy plus its crown cross, and for the sea: an

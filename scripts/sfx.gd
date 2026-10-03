@@ -207,6 +207,30 @@ func _build_sounds() -> void:
 		_noise(0.05, 50.0, 0.9, 0.10, 112),
 	]), false)
 
+	# combat
+	_sounds["mob_hurt"] = _wav(_mix([
+		_tone(300.0, 170.0, 0.18, 16.0, 0.36, 1),
+		_noise(0.12, 30.0, 0.5, 0.18, 131),
+	]), false)
+	_sounds["mob_die"] = _wav(_mix([
+		_tone(320.0, 80.0, 0.55, 5.5, 0.42, 1),
+		_tone(160.0, 55.0, 0.6, 5.0, 0.24, 1),
+	]), false)
+	_sounds["explode"] = _wav(_mix([
+		_noise(0.75, 6.0, 0.22, 0.90, 141),
+		_noise(0.55, 11.0, 0.55, 0.55, 142),
+		_tone(90.0, 35.0, 0.7, 5.0, 0.42, 1),
+	]), false)
+	_sounds["fuse"] = _wav(_noise(0.35, 8.0, 0.75, 0.30, 151, 1800.0), false)
+	_sounds["bow"] = _wav(_mix([
+		_tone(600.0, 1300.0, 0.12, 26.0, 0.30, 2),
+		_noise(0.08, 40.0, 0.6, 0.16, 152),
+	]), false)
+	_sounds["tool_break"] = _wav(_mix([
+		_noise(0.22, 18.0, 0.7, 0.45, 161),
+		_tone(520.0, 120.0, 0.18, 20.0, 0.22, 2),
+	]), false)
+
 
 ## A slow, unobtrusive pad progression that loops seamlessly.
 func _make_music() -> PackedFloat32Array:
@@ -267,13 +291,14 @@ func step_sound_for(block_id: int) -> String:
 	match block_id:
 		Blocks.STONE, Blocks.COBBLESTONE, Blocks.BEDROCK, Blocks.COAL_ORE, Blocks.IRON_ORE, \
 		Blocks.GOLD_ORE, Blocks.DIAMOND_ORE, Blocks.OBSIDIAN, Blocks.BRICK, Blocks.SANDSTONE, \
-		Blocks.GLOWSTONE:
+		Blocks.GLOWSTONE, Blocks.FURNACE, Blocks.FURNACE_LIT:
 			return "step_hard"
-		Blocks.PLANKS, Blocks.LOG, Blocks.CRAFTING_TABLE:
+		Blocks.PLANKS, Blocks.LOG, Blocks.CRAFTING_TABLE, Blocks.CHEST, Blocks.DOOR, \
+		Blocks.DOOR_OPEN, Blocks.FENCE, Blocks.LADDER:
 			return "step_wood"
 		Blocks.SNOW:
 			return "step_snow"
 		Blocks.SAND, Blocks.GRAVEL, Blocks.DIRT, Blocks.GRASS, Blocks.LEAVES, Blocks.TALL_GRASS, \
-		Blocks.FLOWER_RED, Blocks.FLOWER_YELLOW, Blocks.CACTUS:
+		Blocks.FLOWER_RED, Blocks.FLOWER_YELLOW, Blocks.CACTUS, Blocks.FARMLAND:
 			return "step_soft"
 	return "step_soft"

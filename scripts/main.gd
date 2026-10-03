@@ -12,6 +12,9 @@ var sky: Node3D
 var mobs: Node3D
 var item_entities: Node3D
 var particles: Node3D
+var projectiles: Node3D
+var containers: Node
+var _grow_t := 0.0            # wheat growth clock
 var hud: CanvasLayer
 var ui: CanvasLayer
 var selection: MeshInstance3D
@@ -90,6 +93,34 @@ func _ready() -> void:
 	player.block_broken.connect(_on_block_broken)
 	player.item_thrown.connect(_on_item_thrown)
 	item_entities.setup(world, player)
+
+	# Combat wiring: skeletons fire at the player, mobs can hurt the player, and the
+	# player's melee swing asks the mob manager what it hit.
+	projectiles = load("res://scripts/projectiles.gd").new()
+	projectiles.name = "Projectiles"
+	add_child(projectiles)
+	projectiles.setup(world)
+	projectiles.player = player
+	projectiles.particles = particles
+	projectiles.mobs = mobs
+	mobs.player = player
+	mobs.particles = particles
+	mobs.projectiles = projectiles
+	mobs.mob_died.connect(_on_mob_died)
+	mobs.exploded.connect(_on_explode)
+	player.set_mobs(mobs)
+
+	# Chest / furnace contents, and the interaction signals that open their panels.
+	containers = load("res://scripts/containers.gd").new()
+	containers.name = "Containers"
+	add_child(containers)
+	containers.setup(world)
+	containers.player = player
+	containers.item_entities = item_entities
+	world.containers = containers
+	world.container_opened.connect(_on_container_opened)
+	world.furnace_opened.connect(_on_furnace_opened)
+	world.table_opened.connect(_on_table_opened)
 
 	hud = load("res://scripts/hud.gd").new()
 	hud.name = "HUD"
@@ -234,14 +265,88 @@ func _on_block_hit(pos: Vector3i, id: int) -> void:
 func _on_block_broken(pos: Vector3i, id: int) -> void:
 	var at := _block_center(pos)
 	particles.burst(at, Blocks.average_color(id), 12)
+	# a broken chest or furnace spills what it held, in any game mode
+	if id == Blocks.CHEST or id == Blocks.FURNACE or id == Blocks.FURNACE_LIT:
+		containers.remove(pos)
 	if player.creative:
 		return
-	var drop: int = Blocks.drops[id]
+	# what a block drops now depends on the tool that broke it: stone needs a pickaxe,
+	# deeper ores need a better one, and a wrong tool yields nothing
+	var drop: int = Gear.drop_for(id, player.selected_id())
 	if drop > 0:
 		item_entities.drop(drop, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
 	# leaves occasionally cough up an apple, which is what feeds the hunger bar
 	if id == Blocks.LEAVES and randf() < 0.08:
 		item_entities.drop(Blocks.ITEM_APPLE, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
+	# a wheat plant gives seeds back, and ripe wheat gives grain too
+	if _is_wheat(id):
+		item_entities.drop(Blocks.ITEM_SEEDS, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
+		if id == Blocks.WHEAT_3:
+			item_entities.drop(Blocks.ITEM_WHEAT, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
+	# tall grass sometimes holds seeds, the way leaves hold an apple
+	if id == Blocks.TALL_GRASS and randf() < 0.4:
+		item_entities.drop(Blocks.ITEM_SEEDS, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
+
+
+func _is_wheat(id: int) -> bool:
+	return id == Blocks.WHEAT_0 or id == Blocks.WHEAT_1 or id == Blocks.WHEAT_2 or id == Blocks.WHEAT_3
+
+
+## A mob died: drop its loot on the ground (creative players get nothing, as with blocks).
+func _on_mob_died(kind: String, pos: Vector3) -> void:
+	Sfx.play("mob_die", -6.0, randf_range(0.9, 1.1))
+	particles.burst(pos + Vector3(0, 0.4, 0), Color(0.4, 0.4, 0.4), 10)
+	if player.creative:
+		return
+	match kind:
+		"zombie":
+			if randf() < 0.7:
+				item_entities.drop(Blocks.ITEM_ROTTEN_FLESH, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
+		"skeleton":
+			item_entities.drop(Blocks.ITEM_BONE, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
+			if randf() < 0.5:
+				item_entities.drop(Blocks.ITEM_ARROW, 1, pos + Vector3(0, 0.3, 0))
+		"spider":
+			item_entities.drop(Blocks.ITEM_STRING, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
+		"creeper":
+			item_entities.drop(Blocks.ITEM_GUNPOWDER, 1, pos + Vector3(0, 0.3, 0))
+		"pig":
+			item_entities.drop(Blocks.ITEM_PORKCHOP_RAW, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
+		"cow":
+			item_entities.drop(Blocks.ITEM_LEATHER, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
+			item_entities.drop(Blocks.ITEM_BEEF_RAW, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
+		"sheep":
+			item_entities.drop(Blocks.ITEM_BEEF_RAW, 1, pos + Vector3(0, 0.3, 0))
+		"chicken":
+			item_entities.drop(Blocks.ITEM_CHICKEN_RAW, 1, pos + Vector3(0, 0.3, 0))
+			if randf() < 0.5:
+				item_entities.drop(Blocks.ITEM_FEATHER, 1, pos + Vector3(0, 0.3, 0))
+
+
+## A creeper went off: blast a sphere of blocks away through the edit seam (which also
+## removes the plants resting on them and records the change for the save), then hurt
+## the player by how close they were.
+func _on_explode(pos: Vector3, radius: float) -> void:
+	Sfx.play("explode", -3.0, randf_range(0.9, 1.1))
+	particles.burst(pos + Vector3(0, 0.5, 0), Color(0.9, 0.75, 0.4), 26)
+	var r := int(ceil(radius))
+	var centre := Vector3i(floori(pos.x), floori(pos.y), floori(pos.z))
+	for dx in range(-r, r + 1):
+		for dy in range(-r, r + 1):
+			for dz in range(-r, r + 1):
+				if float(dx * dx + dy * dy + dz * dz) > radius * radius:
+					continue
+				var bx := centre.x + dx
+				var by := centre.y + dy
+				var bz := centre.z + dz
+				var id: int = world.get_block(bx, by, bz)
+				if id == Blocks.AIR or id == Blocks.BEDROCK:
+					continue
+				world.set_block(bx, by, bz, Blocks.AIR)
+	var dist := pos.distance_to(player.global_position)
+	if dist < radius + 2.0:
+		var power := clampf(1.0 - dist / (radius + 2.0), 0.0, 1.0)
+		player.hurt(8.0 * power)
 
 
 func _block_center(pos: Vector3i) -> Vector3:
@@ -278,6 +383,9 @@ func _on_new_world(nm: String, s: int, creative: bool, distance: int, cheats: bo
 	world.reset()
 	mobs.reset()
 	item_entities.reset()
+	if projectiles != null:
+		projectiles.clear()
+	containers.reset()
 	particles.clear()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
@@ -305,6 +413,9 @@ func _on_load_world(dir_name: String) -> void:
 	world_dir = dir_name
 	mobs.reset()
 	item_entities.reset()
+	if projectiles != null:
+		projectiles.clear()
+	containers.reset()
 	particles.clear()
 	world_name = str(meta.get("name", dir_name))
 	seed_value = int(meta.get("seed", 12345))
@@ -320,6 +431,11 @@ func _on_load_world(dir_name: String) -> void:
 	if ed != null:
 		world.load_edits(ed.get_buffer(ed.get_length()))
 		ed.close()
+	# the panels' facings, read right after the blocks they belong to
+	var fdf := FileAccess.open("%s/facing.bin" % base, FileAccess.READ)
+	if fdf != null:
+		world.load_facing(fdf.get_buffer(fdf.get_length()))
+		fdf.close()
 	# the circuit file has to be read *after* the edits, or the circuit blocks it
 	# refers to are not in the world yet and every one of them is dropped
 	if world.circuit != null:
@@ -328,6 +444,13 @@ func _on_load_world(dir_name: String) -> void:
 		if cf != null:
 			world.circuit.load_state(cf.get_buffer(cf.get_length()))
 			cf.close()
+	# chest and furnace contents, read after the blocks exist so a record whose chest has
+	# since been broken can be dropped
+	var cbf := FileAccess.open("%s/containers.bin" % base, FileAccess.READ)
+	if cbf != null:
+		containers.load_state(cbf.get_buffer(cbf.get_length()))
+		cbf.close()
+	containers.prune()
 	var ps = meta.get("player", {})
 	if ps is Dictionary:
 		player.reset_inventory()
@@ -410,6 +533,9 @@ func _quit_to_title() -> void:
 	world.reset()
 	mobs.reset()
 	item_entities.reset()
+	if projectiles != null:
+		projectiles.clear()
+	containers.reset()
 	particles.clear()
 	_enter_title()
 
@@ -452,9 +578,11 @@ func _apply_settings(from_menu: bool = true) -> void:
 
 
 # ================================================================ inventory
-func _open_inventory() -> void:
+func _open_inventory(table: bool = false) -> void:
 	if mode != Mode.PLAY:
 		return
+	# Without a table only recipes that fit in the 2x2 corner will match.
+	player.table_available = table
 	_inv_open = true
 	hud.open_inventory(true)
 	player.set_input_enabled(false)
@@ -463,9 +591,35 @@ func _open_inventory() -> void:
 
 func _close_inventory() -> void:
 	_inv_open = false
+	player.table_available = false
 	hud.open_inventory(false)
+	hud.close_container()
 	player.set_input_enabled(true)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _on_table_opened(_pos: Vector3i) -> void:
+	_open_inventory(true)
+
+
+func _on_container_opened(pos: Vector3i) -> void:
+	if mode != Mode.PLAY:
+		return
+	player.table_available = false
+	_inv_open = true
+	hud.open_chest(pos)
+	player.set_input_enabled(false)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func _on_furnace_opened(pos: Vector3i) -> void:
+	if mode != Mode.PLAY:
+		return
+	player.table_available = false
+	_inv_open = true
+	hud.open_furnace(pos)
+	player.set_input_enabled(false)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 # ================================================================ chat & commands
@@ -559,6 +713,11 @@ func _save_game() -> void:
 	if e != null:
 		e.store_buffer(world.serialize_edits())
 		e.close()
+	# a thin panel's facing is not derivable from the block id, so it gets its own file
+	var ff := FileAccess.open("%s/facing.bin" % base, FileAccess.WRITE)
+	if ff != null:
+		ff.store_buffer(world.serialize_facing())
+		ff.close()
 	# circuit state is not derivable from the blocks alone -- a lever's position and
 	# a piston's arm are not in the voxel data -- so it gets its own file
 	if world.circuit != null:
@@ -566,6 +725,12 @@ func _save_game() -> void:
 		if cf != null:
 			cf.store_buffer(world.circuit.serialize())
 			cf.close()
+	# chest and furnace contents get their own file too; a world saved before this
+	# existed simply has no containers.bin, and loads with everything empty
+	var cbf := FileAccess.open("%s/containers.bin" % base, FileAccess.WRITE)
+	if cbf != null:
+		cbf.store_buffer(containers.serialize())
+		cbf.close()
 	if mode == Mode.PAUSE or mode == Mode.PLAY:
 		hud.toast(I18n.tf("World saved  (%d blocks changed)", [world.edit_count()]))
 
@@ -608,15 +773,16 @@ func _remove_dir(path: String) -> void:
 
 
 # ================================================================ leaving the window
-## Taking the mouse out of the window, or the window out of focus, pauses the game and
-## puts the pause screen up.
+## Losing the window pauses the game and puts the pause screen up.
 ##
-## This can only fire once a menu has released the cursor. While actually playing the mouse
-## is `MOUSE_MODE_CAPTURED`, which is what first-person look needs -- the view is driven by
-## relative motion, and relative motion only exists while the cursor is held -- so the
-## cursor has no way out of the window mid-play. The order is therefore always: open a menu
-## (which frees the cursor), take it somewhere else, and the world stops instead of running
-## on behind the menu while nobody is watching it.
+## While playing the mouse is `MOUSE_MODE_CAPTURED`: first-person look is driven by
+## relative motion, and relative motion only exists while the cursor is held. On Windows
+## that capture is a `ClipCursor` grab -- the OS pins the pointer inside our client rect --
+## so if it is not released the player cannot move the cursor in any other window either.
+## Alt-tabbing must therefore free the pointer *immediately*, never on the next voluntary
+## menu. `_process` polls the window's own focus as a backstop: the OS notification can
+## arrive a frame late (or not at all) with the pointer still clipped, so relying on the
+## notification alone is what left the cursor trapped inside the game.
 func _notification(what: int) -> void:
 	# Not during a capture run: those drive the game from a script, and a window that
 	# happens to be unfocused would pause them out from under their own assertions.
@@ -632,6 +798,11 @@ func _notification(what: int) -> void:
 ## assert on it. Coming back deliberately does nothing: a stray click on the window must
 ## not put the player back in the world mid-swing, so resuming stays a menu choice.
 func _leave_window() -> void:
+	# Free the OS grab first and unconditionally, independent of what the game mode does
+	# next: as long as the mode stays CAPTURED the pointer is clipped to our window, so
+	# this is the part that must not be skipped.
+	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if mode == Mode.PLAY:
 		_pause()
 
@@ -689,8 +860,33 @@ func _save_screenshot() -> void:
 
 
 # ================================================================ frame
+## Wheat ripens over time. Only planted crops are in the edit list (worldgen plants
+## none), so a random sample of the edits is enough to advance the crops without keeping
+## a parallel list of every one.
+func _grow_crops(delta: float) -> void:
+	_grow_t -= delta
+	if _grow_t > 0.0:
+		return
+	_grow_t = 2.5
+	var keys: Array = world.edits.keys()
+	if keys.is_empty():
+		return
+	for i in 16:
+		var pos: Vector3i = keys[randi() % keys.size()]
+		var id: int = world.get_block(pos.x, pos.y, pos.z)
+		if id == Blocks.WHEAT_0 or id == Blocks.WHEAT_1 or id == Blocks.WHEAT_2:
+			if randf() < 0.35:
+				world.set_block(pos.x, pos.y, pos.z, id + 1)
+
+
 func _process(delta: float) -> void:
 	_fps_smooth = lerpf(_fps_smooth, 1.0 / maxf(delta, 0.0001), clampf(delta * 6.0, 0.0, 1.0))
+	# Backstop for the capture grab: if the pointer is still captured and our window is no
+	# longer focused, release it now. The OS focus notification does not always land with
+	# the pointer still clipped to us, and on Windows that means the cursor is trapped in
+	# the game rect even after switching to another window.
+	if _capture == "" and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not get_window().has_focus():
+		_leave_window()
 	if mode == Mode.PLAY or mode == Mode.LOADING:
 		sky.advance(delta)
 		var in_water: bool = player.head_in_water()
@@ -701,7 +897,10 @@ func _process(delta: float) -> void:
 		# this is a dictionary lookup on a quiet frame
 		if world.circuit != null:
 			world.circuit.update(delta)
-		mobs.update(player.global_position, delta)
+		containers.update(delta)
+		_grow_crops(delta)
+		mobs.update(player.global_position, delta, sky.is_night())
+		projectiles.update(player.global_position, delta)
 		item_entities.update(player.global_position, delta)
 		particles.update(delta)
 		_update_selection()
@@ -907,6 +1106,9 @@ func _run_selftest() -> void:
 	#    is the (-999, 0, 0) fallback and every assertion below it cascades.
 	player.health = 20.0
 	player.place_at(world.safe_spawn_near(player.global_position))
+	# Clear the mobs first: a mob wandering into the crosshair legitimately takes the
+	# swing instead of the block, and this step is about digging, not combat.
+	mobs.reset()
 	player.pitch = 0.0
 	player.yaw = 0.0
 	for i in 12:
@@ -931,9 +1133,13 @@ func _run_selftest() -> void:
 			break
 	Input.action_release("attack")
 	var broke: bool = world.get_block(target.x, target.y, target.z) == Blocks.AIR
+	var still: Vector3i = player.look_at_block().get("pos", Vector3i(-999, 0, 0))
 	_check("block broken by holding LMB", broke,
-		"%s -> %s" % [Blocks.display_name(before_id),
-			Blocks.display_name(world.get_block(target.x, target.y, target.z))])
+		"%s -> %s  [mode=%d input=%s on_ground=%s vel=%.2f want=%s now=%s]" % [
+			Blocks.display_name(before_id),
+			Blocks.display_name(world.get_block(target.x, target.y, target.z)),
+			mode, str(player.input_enabled), str(player.on_ground),
+			player.velocity.length(), str(target), str(still)])
 	# the drop now pops out as an item entity, so the player has to walk onto it
 	var drop: int = Blocks.drops[before_id]
 	_check("broken block spawned a drop entity", item_entities.count() > 0,
@@ -1114,6 +1320,114 @@ func _run_selftest() -> void:
 		if found_water:
 			break
 	_check("water generated somewhere", found_water)
+
+	# 10. tools, armour and the block -> tool rules
+	_check("stone needs a pickaxe to drop",
+		Gear.drop_for(Blocks.STONE, 0) == -1
+		and Gear.drop_for(Blocks.STONE, Blocks.ITEM_WOOD_PICK) == Blocks.COBBLESTONE)
+	_check("a stone pickaxe cannot harvest diamond ore",
+		Gear.drop_for(Blocks.DIAMOND_ORE, Blocks.ITEM_STONE_PICK) == -1
+		and Gear.drop_for(Blocks.DIAMOND_ORE, Blocks.ITEM_IRON_PICK) == Blocks.ITEM_DIAMOND)
+	_check("a matching tool mines faster, a wrong one does not",
+		Gear.speed_for(Blocks.ITEM_DIAMOND_PICK, Blocks.STONE) > 2.0
+		and Gear.speed_for(Blocks.ITEM_DIAMOND_PICK, Blocks.LOG) == 1.0)
+	var saved_sel: int = player.selected
+	player.hotbar[0] = {"id": Blocks.ITEM_WOOD_PICK, "count": 1, "dur": 2}
+	player.selected = 0
+	player.tool_damage_selected(1)
+	player.tool_damage_selected(1)
+	_check("a tool wears out and leaves the hand", int(player.hotbar[0]["id"]) == 0)
+	player.hotbar[0] = {"id": 0, "count": 0}
+	player.selected = saved_sel
+	player.creative = false
+	player.armor[1] = {"id": Blocks.ITEM_DIAMOND_CHESTPLATE, "count": 1, "dur": 100}
+	player.health = 20.0
+	player._invuln = 0.0
+	player.hurt(4.0)
+	var armored: float = 20.0 - player.health
+	_check("armour absorbs part of a hit", armored > 0.0 and armored < 4.0, "took %.2f" % armored)
+	player.armor[1] = {"id": 0, "count": 0}
+	player.health = 20.0
+	player._invuln = 0.0
+	player.hurt(4.0)
+	_check("with no armour the hit is full", is_equal_approx(20.0 - player.health, 4.0))
+
+	# 11. interaction blocks: door, ladder, chest, furnace, crafting-table gating
+	var dpos := Vector3i(5, 44, 5)
+	world.set_block(dpos.x, dpos.y, dpos.z, Blocks.DOOR)
+	_check("a closed door blocks movement", world.is_solid(dpos.x, dpos.y, dpos.z))
+	world.interact_block(dpos, Blocks.DOOR)
+	_check("right-click opens the door", world.get_block(dpos.x, dpos.y, dpos.z) == Blocks.DOOR_OPEN
+		and not world.is_solid(dpos.x, dpos.y, dpos.z))
+	world.interact_block(dpos, Blocks.DOOR_OPEN)
+	_check("clicking again closes it", world.get_block(dpos.x, dpos.y, dpos.z) == Blocks.DOOR)
+
+	# a thin panel remembers the way it faced when placed, and that round-trips
+	world.set_place_look(Vector3(-1, 0, 0))
+	world.set_block(9, 44, 9, Blocks.DOOR)
+	var pfpos := Vector3i(9, 44, 9)
+	_check("a panel remembers which way it faces",
+		world.facing_override.get(pfpos, Vector3i.ZERO) == Vector3i(-1, 0, 0))
+	var fbuf: PackedByteArray = world.serialize_facing()
+	world.facing_override.clear()
+	world.load_facing(fbuf)
+	_check("panel facing survives save and load",
+		world.facing_override.get(pfpos, Vector3i.ZERO) == Vector3i(-1, 0, 0))
+
+	var fc := Vector3i(floori(player.global_position.x), floori(player.global_position.y),
+		floori(player.global_position.z))
+	world.set_block(fc.x, fc.y, fc.z, Blocks.LADDER)
+	_check("a ladder cell is detected for climbing", player.on_ladder())
+	world.set_block(fc.x, fc.y, fc.z, Blocks.AIR)
+
+	var cpos := Vector3i(6, 44, 6)
+	world.set_block(cpos.x, cpos.y, cpos.z, Blocks.CHEST)
+	containers.chest_at(cpos)[0] = {"id": Blocks.ITEM_DIAMOND, "count": 5}
+	var cbuf: PackedByteArray = containers.serialize()
+	containers.reset()
+	containers.load_state(cbuf)
+	_check("chest contents survive save and load",
+		int(containers.chest_at(cpos)[0]["id"]) == Blocks.ITEM_DIAMOND
+		and int(containers.chest_at(cpos)[0]["count"]) == 5)
+	containers.remove(cpos)
+
+	var fpos := Vector3i(7, 44, 7)
+	world.set_block(fpos.x, fpos.y, fpos.z, Blocks.FURNACE)
+	var fur: Dictionary = containers.furnace_at(fpos)
+	fur["input"] = {"id": Blocks.IRON_ORE, "count": 1}
+	fur["fuel"] = {"id": Blocks.ITEM_COAL, "count": 1}
+	for i in 20:
+		containers.update(1.0)
+	_check("a furnace smelts ore into an ingot",
+		int(fur["output"]["id"]) == Blocks.ITEM_IRON and int(fur["output"]["count"]) >= 1)
+	containers.remove(fpos)
+
+	for i in 9:
+		player.crafting[i] = {"id": 0, "count": 0}
+	player.table_available = false
+	for i in 3:
+		player.crafting[i] = {"id": Blocks.ITEM_STICK, "count": 1}
+		player.crafting[3 + i] = {"id": Blocks.ITEM_STICK, "count": 1}
+	_check("a 3-wide recipe is refused without a table", int(player.craft_result()["id"]) == 0)
+	player.table_available = true
+	_check("a crafting table unlocks it", int(player.craft_result()["id"]) == Blocks.FENCE)
+	player.table_available = false
+	for i in 9:
+		player.crafting[i] = {"id": 0, "count": 0}
+
+	# 12. combat: mobs take damage, die, and a skeleton's arrow hurts the player
+	var mob = mobs.spawn_at("zombie", player.global_position + Vector3(3, 0, 0))
+	_check("a hostile mob spawns", mob.is_hostile())
+	var mhp: float = mob.health
+	mob.hurt_mob(5.0)
+	_check("a mob loses health when hit", mob.health < mhp, "%.0f -> %.0f" % [mhp, mob.health])
+	mob.hurt_mob(100.0)
+	_check("a mob dies at zero health", mob.health <= 0.0)
+	var php: float = player.health
+	player._invuln = 0.0
+	projectiles.spawn(player.global_position + Vector3(1.0, 0.9, 0), Vector3(-1, 0, 0), 26.0, 4.0, false)
+	projectiles.update(player.global_position, 0.05)
+	_check("an arrow fired at the player hurts them", player.health < php)
 
 	# The save did its job several checks ago; take it away again at the very end.
 	# Without this every run leaves another "Selftest_<timestamp>" world behind, and
@@ -2642,6 +2956,10 @@ func _check_capture() -> void:
 			_capture = "glass"
 		elif a == "--capture-power":
 			_capture = "power"
+		elif a == "--capture-hostiles":
+			_capture = "hostiles"
+		elif a == "--capture-station":
+			_capture = "station"
 		elif a == "--capture-reload":
 			_capture = "reload"
 		elif a == "--capture-create":
@@ -3125,6 +3443,117 @@ func _run_capture() -> void:
 			for i in 90:
 				await get_tree().physics_frame
 			await _shot("power.png")
+		"hostiles":
+			# the four hostile mobs at night: the only way to judge their box models,
+			# the hurt flash and the creeper's fuse swell
+			_on_new_world("Preview", _capture_seed, false, 5)
+			await _wait_loaded()
+			# daylight for a clean look at the models: they only take one burn tick in
+			# the fraction of a second the shot needs, so none of them die first
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.place_at(world.safe_spawn_near(player.global_position))
+			await _settle()
+			var hbx := floori(player.global_position.x) - 6
+			var hbz := floori(player.global_position.z) - 8
+			var hgy: int = world.highest_occluder(hbx, hbz)
+			# a stone deck, so the green mobs do not vanish against green grass
+			for i in range(0, 8):
+				for dz in range(-2, 3):
+					world.set_block(hbx + i, hgy - 1, hbz + dz, Blocks.STONE)
+					for dy in range(0, 4):
+						world.set_block(hbx + i, hgy + dy, hbz + dz, Blocks.AIR)
+			mobs.spawn_at("zombie", Vector3(float(hbx), float(hgy), float(hbz)))
+			mobs.spawn_at("skeleton", Vector3(float(hbx + 2), float(hgy), float(hbz)))
+			mobs.spawn_at("spider", Vector3(float(hbx + 4), float(hgy), float(hbz)))
+			mobs.spawn_at("creeper", Vector3(float(hbx + 6), float(hgy), float(hbz)))
+			player.creative = true
+			player.flying = true
+			player.place_at(Vector3(float(hbx + 3), float(hgy) + 2.4, float(hbz + 5)))
+			player.yaw = 0.0
+			player.pitch = -0.24
+			for i in 40:
+				await get_tree().physics_frame
+			await _shot("hostiles.png")
+		"station":
+			# the crafting station: a chest, a smelting furnace, tilled farmland with
+			# wheat at every stage, and tools in the hotbar
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.place_at(world.safe_spawn_near(player.global_position))
+			await _settle()
+			var sx := floori(player.global_position.x / 16.0) * 16 + 3
+			var sz := floori(player.global_position.z / 16.0) * 16 + 3
+			var sy: int = world.highest_occluder(sx, sz) + 1
+			for dx in range(-2, 12):
+				for dz in range(-2, 10):
+					for dy in range(-4, 0):
+						world.set_block(sx + dx, sy + dy, sz + dz, Blocks.DIRT)
+					for dy in range(0, 6):
+						world.set_block(sx + dx, sy + dy, sz + dz, Blocks.AIR)
+			world.set_block(sx, sy, sz, Blocks.CHEST)
+			containers.chest_at(Vector3i(sx, sy, sz))[0] = {"id": Blocks.ITEM_IRON, "count": 32}
+			world.set_block(sx + 2, sy, sz, Blocks.FURNACE)
+			var fur: Dictionary = containers.furnace_at(Vector3i(sx + 2, sy, sz))
+			fur["input"] = {"id": Blocks.IRON_ORE, "count": 3}
+			fur["fuel"] = {"id": Blocks.ITEM_COAL, "count": 1}
+			fur["burn"] = 40.0
+			for i in 5:
+				world.set_block(sx + i, sy - 1, sz + 2, Blocks.FARMLAND)
+			world.set_block(sx, sy, sz + 2, Blocks.WHEAT_0)
+			world.set_block(sx + 1, sy, sz + 2, Blocks.WHEAT_1)
+			world.set_block(sx + 2, sy, sz + 2, Blocks.WHEAT_2)
+			world.set_block(sx + 3, sy, sz + 2, Blocks.WHEAT_3)
+			# thin blocks that must not render as full cubes: a closed and an open two-tall
+			# door, a ladder, a fence and a glass pane. The look sets which way panels face.
+			world.set_place_look(Vector3(0, 0, -1))
+			for dy in 2:
+				world.set_block(sx + 4, sy + dy, sz, Blocks.DOOR)
+				world.set_block(sx + 5, sy + dy, sz, Blocks.DOOR)
+			# open the second one, so the shot shows the leaf swung against the wall
+			world.interact_block(Vector3i(sx + 5, sy, sz), Blocks.DOOR)
+			world.set_block(sx + 6, sy, sz, Blocks.LADDER)
+			world.set_block(sx + 7, sy, sz, Blocks.FENCE)
+			world.set_block(sx + 8, sy, sz, Blocks.GLASS_PANE)
+			world.set_block(sx + 8, sy + 1, sz, Blocks.GLASS)
+			player.hotbar[0] = {"id": Blocks.ITEM_DIAMOND_PICK, "count": 1, "dur": 900}
+			player.hotbar[1] = {"id": Blocks.ITEM_IRON_SWORD, "count": 1, "dur": 120}
+			player.hotbar[2] = {"id": Blocks.ITEM_WOOD_HOE, "count": 1, "dur": 40}
+			player.hotbar[3] = {"id": Blocks.ITEM_SEEDS, "count": 12}
+			player.hotbar_changed.emit()
+			player.creative = true
+			player.flying = true
+			player.selected = 0
+			player.place_at(Vector3(float(sx + 4), float(sy) + 2.2, float(sz + 9)))
+			player.yaw = 0.0
+			player.pitch = -0.16
+			player.refresh_hand()
+			for i in 14:
+				await get_tree().physics_frame
+			# first person, looking straight at the row of thin blocks
+			await _shot("station.png")
+			# second person: the camera sits in front looking back, so the tool in the
+			# right hand faces it and can actually be seen
+			player.cycle_camera()
+			player.cycle_camera()
+			for i in 6:
+				await get_tree().physics_frame
+			await _shot("station_tool.png")
+			player.cycle_camera()
+			for i in 4:
+				await get_tree().physics_frame
+			hud.open_chest(Vector3i(sx, sy, sz))
+			await get_tree().process_frame
+			await get_tree().process_frame
+			await _shot("station_chest.png")
+			hud.close_container()
+			hud.open_furnace(Vector3i(sx + 2, sy, sz))
+			await get_tree().process_frame
+			await get_tree().process_frame
+			await _shot("station_furnace.png")
+			hud.close_container()
 		"cave":
 			_on_new_world("Preview", _capture_seed, true, 5)
 			await _wait_loaded()

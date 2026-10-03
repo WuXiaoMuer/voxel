@@ -28,6 +28,7 @@ const MAX_HEALTH := 20.0
 const MAX_HUNGER := 20.0
 const INVULN := 0.5
 const DOUBLE_TAP := 0.32
+const CLIMB := 3.2
 
 signal health_changed
 signal hunger_changed
@@ -84,8 +85,13 @@ var swing_t := 0.0
 var hotbar: Array = []       # 9 x {id:int, count:int}
 var inventory: Array = []    # 27 x {id:int, count:int}
 var crafting: Array = []     # 3x3 grid, 9 x {id, count}
+var armor: Array = []        # 4 equipped pieces: helmet, chest, legs, boots
 var selected := 0
 var cursor_stack: Dictionary = {"id": 0, "count": 0}
+## Light crafting-table gating: the inventory always shows the 3x3 grid, but a recipe
+## whose shape is bigger than 2x2 only matches while this is true — which main sets when
+## the player opens the grid from an actual crafting table.
+var table_available := false
 
 var _dig_progress := 0.0
 var _dig_target := Vector3i(-9999, 0, 0)
@@ -99,6 +105,7 @@ var _invuln := 0.0
 var _step_dist := 0.0
 var _sprint_toggle := false
 var _reach := REACH
+var mobs = null              # injected by main: the melee swing's mob raycast
 var _starve_timer := 0.0
 
 var _searching := {}
@@ -111,6 +118,8 @@ func _ready() -> void:
 		inventory.append(item_stack(0, 0))
 	for i in 9:
 		crafting.append(item_stack(0, 0))
+	for i in 4:
+		armor.append(item_stack(0, 0))
 	cam_pivot = Node3D.new()
 	cam_pivot.position = Vector3(0, EYE, 0)
 	add_child(cam_pivot)
@@ -197,6 +206,8 @@ func reset_inventory() -> void:
 		inventory[i] = item_stack(0, 0)
 	for i in 9:
 		crafting[i] = item_stack(0, 0)
+	for i in 4:
+		armor[i] = item_stack(0, 0)
 	cursor_stack = item_stack(0, 0)
 	selected = 0
 	hotbar_changed.emit()
@@ -291,6 +302,24 @@ func head_in_water() -> bool:
 
 
 func in_lava() -> bool:
+	return false
+
+
+## True when any cell the player's body occupies is a ladder. Used for climbing and to
+## suppress fall damage while hanging on one.
+func on_ladder() -> bool:
+	var box := feet_aabb()
+	var x0 := floori(box.position.x)
+	var x1 := floori(box.position.x + box.size.x - 0.0001)
+	var y0 := floori(box.position.y)
+	var y1 := floori(box.position.y + box.size.y - 0.0001)
+	var z0 := floori(box.position.z)
+	var z1 := floori(box.position.z + box.size.z - 0.0001)
+	for x in range(x0, x1 + 1):
+		for y in range(y0, y1 + 1):
+			for z in range(z0, z1 + 1):
+				if world.get_block(x, y, z) == Blocks.LADDER:
+					return true
 	return false
 
 
@@ -404,6 +433,14 @@ func _physics_process(delta: float) -> void:
 		# drag only the horizontal axis, or the stroke above would be damped away
 		velocity.x *= 0.94
 		velocity.z *= 0.94
+	elif on_ladder():
+		# climbing: Space goes up, Shift goes down, and letting go holds position
+		var up := 0.0
+		if Input.is_action_pressed("jump"):
+			up = CLIMB
+		elif Input.is_action_pressed("sneak"):
+			up = -CLIMB
+		velocity.y = up
 	else:
 		velocity.y -= GRAVITY * delta
 		if (on_ground or _airborne) and Input.is_action_pressed("jump") and on_ground:
@@ -507,7 +544,7 @@ func _land() -> void:
 
 
 func _update_fall(delta: float) -> void:
-	if on_ground or flying or in_water():
+	if on_ground or flying or in_water() or on_ladder():
 		if _airborne:
 			_airborne = false
 		_fall_y = global_position.y
@@ -647,6 +684,28 @@ func _update_interaction(delta: float) -> void:
 
 	if Input.is_action_pressed("attack"):
 		var hit: Dictionary = world.raycast(eye_position(), look_dir(), _reach)
+		# A swing hits whatever is nearest under the crosshair. A mob standing in front of
+		# a block is hit instead of the block; a mob behind a wall is not, so you cannot dig
+		# through terrain into a mob's face, and a mob can never make digging stall.
+		if mobs != null:
+			var m = mobs.raycast_mob(eye_position(), look_dir(), _reach)
+			if m != null:
+				var mob_d: float = eye_position().distance_to(
+					m.global_position + Vector3(0, float(m._h) * 0.5, 0))
+				var block_d := _reach + 1.0
+				if not hit.is_empty():
+					var bp0: Vector3i = hit["pos"]
+					block_d = eye_position().distance_to(Vector3(bp0) + Vector3(0.5, 0.5, 0.5))
+				if mob_d <= block_d:
+					if _break_cooldown <= 0.0:
+						_break_cooldown = 0.35
+						swing_t = 1.0
+						Sfx.play_varied("dig", -10.0, 0.12)
+						m.hurt_mob(Gear.damage_of(selected_id()), global_position)
+						if Gear.is_tool(selected_id()):
+							tool_damage_selected(1)
+					_dig_progress = 0.0
+					return
 		if hit.is_empty():
 			_dig_progress = 0.0
 			return
@@ -673,9 +732,12 @@ func _update_interaction(delta: float) -> void:
 			Sfx.play_varied("dig", -14.0, 0.15)
 			block_hit.emit(pos, id)
 		swing_t = maxf(swing_t, 0.35)
-		if _dig_progress >= 0.35 + hard * 1.1:
+		if _dig_progress >= _dig_need(id):
 			_break_block(pos, id)
 			_dig_progress = 0.0
+			# a tool wears with every block it breaks
+			if Gear.is_tool(selected_id()):
+				tool_damage_selected(1)
 	else:
 		_dig_progress = 0.0
 		_dig_target = Vector3i(-9999, 0, 0)
@@ -701,17 +763,45 @@ func _break_block(pos: Vector3i, id: int) -> void:
 	block_broken.emit(pos, id)
 
 
+## Hoe and seeds act on the ground: a hoe turns dirt or grass into farmland, and seeds
+## plant a crop on the farmland they are aimed at from above.
+func _farm_action(hit: Dictionary, hp: Vector3i, hid: int) -> bool:
+	var id := selected_id()
+	if id <= 0:
+		return false
+	if Gear.tool_kind(id) == Gear.HOE and (hid == Blocks.GRASS or hid == Blocks.DIRT):
+		world.set_block(hp.x, hp.y, hp.z, Blocks.FARMLAND)
+		Sfx.play_varied("dig", -10.0, 0.1)
+		swing_t = 0.9
+		tool_damage_selected(1)
+		return true
+	if id == Blocks.ITEM_SEEDS and hid == Blocks.FARMLAND:
+		var cell: Vector3i = hit["prev"]
+		# only on the top face, so a side-on click does not plant a floating crop
+		if cell == Vector3i(hp.x, hp.y + 1, hp.z) \
+				and world.get_block(cell.x, cell.y, cell.z) == Blocks.AIR:
+			world.set_block(cell.x, cell.y, cell.z, Blocks.WHEAT_0)
+			Sfx.play_varied("place", -12.0, 0.1)
+			swing_t = 0.9
+			consume_selected(1)
+			return true
+	return false
+
+
 func _try_place() -> void:
 	var hit: Dictionary = world.raycast(eye_position(), look_dir(), _reach)
-	# A circuit component is operated, not covered up: right-clicking a lever flips
-	# it, a button presses it, a repeater turns to face a new way. Only when nothing
-	# under the crosshair wants the click does this fall through to placing a block.
-	if not hit.is_empty() and world.circuit != null:
+	# A block that wants the click is operated, not covered up: a lever flips, a chest
+	# opens, a door swings, a furnace lights up. Only when nothing under the crosshair
+	# wants the click does this fall through to placing a block.
+	if not hit.is_empty():
 		var hp: Vector3i = hit["pos"]
 		var hid: int = world.get_block(hp.x, hp.y, hp.z)
-		if Blocks.circuit_kind(hid) != 0 and world.circuit.interact(hp, hid):
+		if world.interact_block(hp, hid):
 			swing_t = 0.9
 			Sfx.play("click", -10.0, randf_range(0.95, 1.05))
+			return
+		# a hoe tills soil and seeds plant into farmland, rather than placing a block
+		if _farm_action(hit, hp, hid):
 			return
 
 	var stack: Dictionary = hotbar[selected]
@@ -743,6 +833,12 @@ func _try_place() -> void:
 	if world.set_block(cell.x, cell.y, cell.z, id):
 		Sfx.play("place", -8.0, randf_range(0.94, 1.06))
 		swing_t = 0.9
+		# a door is two blocks tall: the upper half comes with it, or one block would
+		# leave a doorway you could walk through at head height
+		if id == Blocks.DOOR:
+			var up := Vector3i(cell.x, cell.y + 1, cell.z)
+			if world.get_block(up.x, up.y, up.z) == Blocks.AIR:
+				world.set_block(up.x, up.y, up.z, Blocks.DOOR)
 		if not creative:
 			consume_selected(1)
 
@@ -769,6 +865,10 @@ func give(id: int, count: int) -> void:
 				s["id"] = id
 				var add2: int = mini(maxs, count)
 				s["count"] = add2
+				# a tool or piece of armour arrives with a full durability bar
+				var maxd := Gear.max_durability(id)
+				if maxd > 0:
+					s["dur"] = maxd
 				count -= add2
 				if count <= 0:
 					hotbar_changed.emit()
@@ -862,13 +962,47 @@ func selected_id() -> int:
 	return int(hotbar[selected]["id"])
 
 
-## Puts whatever is in the selected slot into the model's right hand. Only blocks have a
-## 3D form, so a tool or an empty slot leaves the hand empty.
+func set_mobs(m) -> void:
+	mobs = m
+
+
+## Wear the selected tool down by `n`. A tool that reaches zero wears out and leaves the
+## hand. Stacks of one (tools, armour) each carry their own `dur`; everything else has
+## no durability to lose.
+func tool_damage_selected(n: int) -> void:
+	var s: Dictionary = hotbar[selected]
+	var id := int(s["id"])
+	var maxd := Gear.max_durability(id)
+	if maxd <= 0:
+		return
+	var d := int(s.get("dur", maxd)) - n
+	if d <= 0:
+		s["id"] = 0
+		s["count"] = 0
+		s.erase("dur")
+		Sfx.play("tool_break", -8.0)
+	else:
+		s["dur"] = d
+	hotbar_changed.emit()
+	# a tool that just broke leaves the hand
+	if int(s["id"]) != id:
+		refresh_hand()
+
+
+## Puts whatever is in the selected slot into the model's right hand: a block cube, a
+## tool, or nothing.
 func refresh_hand() -> void:
 	var id := selected_id()
-	var is_block := id > 0 and Blocks.is_block_item(id)
 	if model != null:
-		model.set_held_block(id if is_block else 0)
+		if id > 0 and Blocks.is_block_item(id):
+			model.set_held_block(id)
+			model.set_held_item(0)
+		elif Gear.is_tool(id):
+			model.set_held_block(0)
+			model.set_held_item(id)
+		else:
+			model.set_held_block(0)
+			model.set_held_item(0)
 	_apply_view_visibility()
 
 
@@ -892,6 +1026,11 @@ func hurt(amount: float, force: bool = false) -> void:
 		return
 	if creative and not force:
 		return
+	# armour absorbs a fraction of the hit, and wears down doing it
+	var reduction := Gear.armor_reduction(armor)
+	if reduction > 0.0:
+		amount *= 1.0 - reduction
+		_wear_armor()
 	health -= amount
 	_invuln = INVULN
 	damage_timer = 6.0
@@ -902,6 +1041,27 @@ func hurt(amount: float, force: bool = false) -> void:
 		dead = true
 		Sfx.play("death", -3.0)
 		died.emit()
+
+
+## Wear every equipped piece down by one point (Minecraft does this per hit, only for
+## worn pieces; here every piece on the body takes the wear).
+func _wear_armor() -> void:
+	var changed := false
+	for s in armor:
+		var id := int(s["id"])
+		var maxd := Gear.max_durability(id)
+		if maxd <= 0:
+			continue
+		var d := int(s.get("dur", maxd)) - 1
+		if d <= 0:
+			s["id"] = 0
+			s["count"] = 0
+			s.erase("dur")
+		else:
+			s["dur"] = d
+		changed = true
+	if changed:
+		hotbar_changed.emit()
 
 
 ## Kills the player regardless of mode, for the `/kill` command.
@@ -977,6 +1137,48 @@ const RECIPES := [
 		"R": Blocks.ITEM_COPPER}, "out": [Blocks.PRESSURE_PLATE, 1]},
 	{"type": "shaped", "pattern": ["PPP", "CIC", "CIC"], "key": {"P": Blocks.PLANKS,
 		"C": Blocks.COBBLESTONE, "I": Blocks.ITEM_IRON}, "out": [Blocks.PISTON, 1]},
+
+	# --- furnace & food
+	{"type": "shaped", "pattern": ["CCC", "C C", "CCC"], "key": {"C": Blocks.COBBLESTONE},
+		"out": [Blocks.FURNACE, 1]},
+	{"type": "shaped", "pattern": ["WWW"], "key": {"W": Blocks.ITEM_WHEAT},
+		"out": [Blocks.ITEM_BREAD, 1]},
+
+	# --- tools: the same three shapes in a different material per tier
+	{"type": "shaped", "pattern": ["MMM", " S ", " S "], "key": {"M": Blocks.PLANKS, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_WOOD_PICK, 1]},
+	{"type": "shaped", "pattern": ["MM", "MS", " S"], "key": {"M": Blocks.PLANKS, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_WOOD_AXE, 1]},
+	{"type": "shaped", "pattern": ["M", "S", "S"], "key": {"M": Blocks.PLANKS, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_WOOD_SHOVEL, 1]},
+	{"type": "shaped", "pattern": ["M", "M", "S"], "key": {"M": Blocks.PLANKS, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_WOOD_SWORD, 1]},
+	{"type": "shaped", "pattern": ["MM", " S", " S"], "key": {"M": Blocks.PLANKS, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_WOOD_HOE, 1]},
+	{"type": "shaped", "pattern": ["MMM", " S ", " S "], "key": {"M": Blocks.COBBLESTONE, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_STONE_PICK, 1]},
+	{"type": "shaped", "pattern": ["MM", "MS", " S"], "key": {"M": Blocks.COBBLESTONE, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_STONE_AXE, 1]},
+	{"type": "shaped", "pattern": ["M", "S", "S"], "key": {"M": Blocks.COBBLESTONE, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_STONE_SHOVEL, 1]},
+	{"type": "shaped", "pattern": ["M", "M", "S"], "key": {"M": Blocks.COBBLESTONE, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_STONE_SWORD, 1]},
+	{"type": "shaped", "pattern": ["MM", " S", " S"], "key": {"M": Blocks.COBBLESTONE, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_STONE_HOE, 1]},
+	{"type": "shaped", "pattern": ["MMM", " S ", " S "], "key": {"M": Blocks.ITEM_IRON, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_IRON_PICK, 1]},
+	{"type": "shaped", "pattern": ["MM", "MS", " S"], "key": {"M": Blocks.ITEM_IRON, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_IRON_AXE, 1]},
+	{"type": "shaped", "pattern": ["M", "S", "S"], "key": {"M": Blocks.ITEM_IRON, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_IRON_SHOVEL, 1]},
+	{"type": "shaped", "pattern": ["M", "M", "S"], "key": {"M": Blocks.ITEM_IRON, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_IRON_SWORD, 1]},
+	{"type": "shaped", "pattern": ["MM", " S", " S"], "key": {"M": Blocks.ITEM_IRON, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_IRON_HOE, 1]},
+	{"type": "shaped", "pattern": ["MMM", " S ", " S "], "key": {"M": Blocks.ITEM_DIAMOND, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_DIAMOND_PICK, 1]},
+	{"type": "shaped", "pattern": ["MM", "MS", " S"], "key": {"M": Blocks.ITEM_DIAMOND, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_DIAMOND_AXE, 1]},
+	{"type": "shaped", "pattern": ["M", "S", "S"], "key": {"M": Blocks.ITEM_DIAMOND, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_DIAMOND_SHOVEL, 1]},
+	{"type": "shaped", "pattern": ["M", "M", "S"], "key": {"M": Blocks.ITEM_DIAMOND, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_DIAMOND_SWORD, 1]},
+	{"type": "shaped", "pattern": ["MM", " S", " S"], "key": {"M": Blocks.ITEM_DIAMOND, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_DIAMOND_HOE, 1]},
+
+	# --- armour: leather first, then iron and diamond
+	{"type": "shaped", "pattern": ["MMM", "M M"], "key": {"M": Blocks.ITEM_LEATHER}, "out": [Blocks.ITEM_LEATHER_HELMET, 1]},
+	{"type": "shaped", "pattern": ["M M", "MMM", "MMM"], "key": {"M": Blocks.ITEM_LEATHER}, "out": [Blocks.ITEM_LEATHER_CHESTPLATE, 1]},
+	{"type": "shaped", "pattern": ["MMM", "M M", "M M"], "key": {"M": Blocks.ITEM_LEATHER}, "out": [Blocks.ITEM_LEATHER_LEGGINGS, 1]},
+	{"type": "shaped", "pattern": ["M M", "M M"], "key": {"M": Blocks.ITEM_LEATHER}, "out": [Blocks.ITEM_LEATHER_BOOTS, 1]},
+	{"type": "shaped", "pattern": ["MMM", "M M"], "key": {"M": Blocks.ITEM_IRON}, "out": [Blocks.ITEM_IRON_HELMET, 1]},
+	{"type": "shaped", "pattern": ["M M", "MMM", "MMM"], "key": {"M": Blocks.ITEM_IRON}, "out": [Blocks.ITEM_IRON_CHESTPLATE, 1]},
+	{"type": "shaped", "pattern": ["MMM", "M M", "M M"], "key": {"M": Blocks.ITEM_IRON}, "out": [Blocks.ITEM_IRON_LEGGINGS, 1]},
+	{"type": "shaped", "pattern": ["M M", "M M"], "key": {"M": Blocks.ITEM_IRON}, "out": [Blocks.ITEM_IRON_BOOTS, 1]},
+	{"type": "shaped", "pattern": ["MMM", "M M"], "key": {"M": Blocks.ITEM_DIAMOND}, "out": [Blocks.ITEM_DIAMOND_HELMET, 1]},
+	{"type": "shaped", "pattern": ["M M", "MMM", "MMM"], "key": {"M": Blocks.ITEM_DIAMOND}, "out": [Blocks.ITEM_DIAMOND_CHESTPLATE, 1]},
+	{"type": "shaped", "pattern": ["MMM", "M M", "M M"], "key": {"M": Blocks.ITEM_DIAMOND}, "out": [Blocks.ITEM_DIAMOND_LEGGINGS, 1]},
+	{"type": "shaped", "pattern": ["M M", "M M"], "key": {"M": Blocks.ITEM_DIAMOND}, "out": [Blocks.ITEM_DIAMOND_BOOTS, 1]},
 ]
 
 
@@ -1041,6 +1243,9 @@ func _match_shaped(ids: Array) -> Dictionary:
 		return {}
 	var w := maxx - minx + 1
 	var h := maxy - miny + 1
+	# a recipe that needs the full 3x3 board only works at a crafting table
+	if (w > 2 or h > 2) and not table_available:
+		return {}
 	for r in RECIPES:
 		if r["type"] != "shaped":
 			continue
@@ -1081,6 +1286,9 @@ func _match_shapeless(ids: Array) -> Dictionary:
 		for v in r["in"]:
 			want.append(int(v))
 		want.sort()
+		# an ingredient list longer than the 2x2 corner also needs the table
+		if want.size() > 4 and not table_available:
+			continue
 		if want == have:
 			var o: Array = r["out"]
 			return {"id": int(o[0]), "count": int(o[1])}
@@ -1107,7 +1315,14 @@ func dig_progress() -> float:
 	var hard := Blocks.hardness[id]
 	if hard <= 0.0:
 		return 0.0
-	return clampf(_dig_progress / (0.35 + hard * 1.1), 0.0, 1.0)
+	return clampf(_dig_progress / _dig_need(id), 0.0, 1.0)
+
+
+## The time (in dig-seconds) a block takes with the tool currently in hand. A matching
+## tool divides the base time by its speed; a bare hand or a wrong tool is the base.
+func _dig_need(id: int) -> float:
+	var base := 0.35 + Blocks.hardness[id] * 1.1
+	return base / maxf(1.0, Gear.speed_for(selected_id(), id))
 
 
 ## The block currently being mined, so the HUD can draw the crack overlay there.
@@ -1125,10 +1340,13 @@ func look_at_block() -> Dictionary:
 func save_state() -> Dictionary:
 	var inv: Array = []
 	for s in inventory:
-		inv.append([int(s["id"]), int(s["count"])])
+		inv.append(_cell_save(s))
 	var hb: Array = []
 	for s in hotbar:
-		hb.append([int(s["id"]), int(s["count"])])
+		hb.append(_cell_save(s))
+	var ar: Array = []
+	for s in armor:
+		ar.append(_cell_save(s))
 	return {
 		"pos": [global_position.x, global_position.y, global_position.z],
 		"yaw": yaw, "pitch": pitch,
@@ -1136,9 +1354,24 @@ func save_state() -> Dictionary:
 		"hunger": hunger, "exhaustion": exhaustion,
 		"creative": creative, "flying": flying,
 		"selected": selected,
-		"hotbar": hb, "inventory": inv,
+		"hotbar": hb, "inventory": inv, "armor": ar,
 		"cursor": [int(cursor_stack["id"]), int(cursor_stack["count"])],
 	}
+
+
+## A saved cell is [id, count], plus a third durability entry when the item has one.
+func _cell_save(s: Dictionary) -> Array:
+	var id := int(s["id"])
+	if id > 0 and Gear.max_durability(id) > 0:
+		return [id, int(s["count"]), int(s.get("dur", Gear.max_durability(id)))]
+	return [id, int(s["count"])]
+
+
+func _cell_load(cell: Array) -> Dictionary:
+	var st := item_stack(int(cell[0]), int(cell[1]))
+	if cell.size() > 2 and int(cell[0]) > 0:
+		st["dur"] = int(cell[2])
+	return st
 
 
 func load_state(d: Dictionary) -> void:
@@ -1155,10 +1388,13 @@ func load_state(d: Dictionary) -> void:
 	selected = int(d.get("selected", 0))
 	var hb: Array = d.get("hotbar", [])
 	for i in mini(9, hb.size()):
-		hotbar[i] = item_stack(int(hb[i][0]), int(hb[i][1]))
+		hotbar[i] = _cell_load(hb[i])
 	var inv: Array = d.get("inventory", [])
 	for i in mini(27, inv.size()):
-		inventory[i] = item_stack(int(inv[i][0]), int(inv[i][1]))
+		inventory[i] = _cell_load(inv[i])
+	var ar: Array = d.get("armor", [])
+	for i in mini(4, ar.size()):
+		armor[i] = _cell_load(ar[i])
 	var cur: Array = d.get("cursor", [0, 0])
 	cursor_stack = item_stack(int(cur[0]), int(cur[1]))
 	dead = false

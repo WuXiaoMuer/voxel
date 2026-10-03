@@ -6,6 +6,9 @@ var _icons: Dictionary = {}
 
 
 func max_stack(id: int) -> int:
+	# tools and armour do not stack — each copy carries its own durability
+	if Gear.is_tool(id) or Gear.is_armor(id):
+		return 1
 	return 64
 
 
@@ -88,6 +91,27 @@ func _ready() -> void:
 			+ "strength, after a short wait. Right-click to aim it.",
 		Blocks.LAMP: "An indicator. Lights up when powered.",
 		Blocks.PISTON: "An actuator. Powered, it shoves the block in front one cell on.",
+		Blocks.FURNACE: "A furnace. Smelt ores into ingots and cook food with fuel.",
+		Blocks.FARMLAND: "Tilled soil. Plant seeds on it and they grow into wheat.",
+		Blocks.WHEAT_0: "Growing wheat. It ripens in stages — harvest only when golden.",
+		Blocks.WHEAT_1: "Growing wheat. It ripens in stages — harvest only when golden.",
+		Blocks.WHEAT_2: "Growing wheat. It ripens in stages — harvest only when golden.",
+		Blocks.WHEAT_3: "Ripe wheat. Harvest it for wheat and more seeds.",
+		Blocks.ITEM_ROTTEN_FLESH: "Food, barely. Eaten when nothing better is around.",
+		Blocks.ITEM_BONE: "A bone. Skeletons leave them behind.",
+		Blocks.ITEM_ARROW: "Ammunition. Skeletons fire them at you.",
+		Blocks.ITEM_STRING: "Thread. Spiders drop it.",
+		Blocks.ITEM_GUNPOWDER: "Explosive dust. Creepers leave it behind.",
+		Blocks.ITEM_SEEDS: "Plant these on farmland to grow wheat.",
+		Blocks.ITEM_WHEAT: "Grain. Bake three in a row into bread.",
+		Blocks.ITEM_LEATHER: "Hide from cows. Armour can be made from it.",
+		Blocks.ITEM_FEATHER: "A feather. Chickens drop them.",
+		Blocks.ITEM_PORKCHOP_RAW: "Raw pork. Cook it in a furnace first.",
+		Blocks.ITEM_PORKCHOP_COOKED: "Cooked pork. A filling meal.",
+		Blocks.ITEM_BEEF_RAW: "Raw beef. Cook it in a furnace first.",
+		Blocks.ITEM_BEEF_COOKED: "Steak. The best meal in the game.",
+		Blocks.ITEM_CHICKEN_RAW: "Raw chicken. Cook it before eating.",
+		Blocks.ITEM_CHICKEN_COOKED: "Cooked chicken. Tasty and safe.",
 	}
 
 
@@ -242,6 +266,14 @@ func _item_icon(id: int, size: int) -> Image:
 	img.fill(Color(0, 0, 0, 0))
 	var k := float(size) / 16.0
 
+	# tools and armour are drawn parametrically from their kind/slot and material tier
+	if Gear.is_tool(id):
+		_tool_icon(img, k, Gear.tool_kind(id), _tool_head(id), _tool_dark(id))
+		return img
+	if Gear.is_armor(id):
+		_armor_icon(img, k, Gear.armor_slot(id), _armor_col(id), _armor_edge(id))
+		return img
+
 	match id:
 		Blocks.ITEM_STICK:
 			for i in 13:
@@ -278,6 +310,64 @@ func _item_icon(id: int, size: int) -> Image:
 				_px(img, x, 6, k, Color(0.86, 0.66, 0.36))
 			_px(img, 6, 9, k, Color(0.50, 0.32, 0.14))
 			_px(img, 9, 11, k, Color(0.50, 0.32, 0.14))
+		# ---- mob drops
+		Blocks.ITEM_ROTTEN_FLESH:
+			_blob_px(img, 8, 9, 4, k, Color(0.52, 0.36, 0.28))
+			_blob_px(img, 7, 8, 2, k, Color(0.62, 0.30, 0.28))
+			_px(img, 6, 11, k, Color(0.40, 0.50, 0.28))
+		Blocks.ITEM_BONE:
+			for i in 9:
+				_px(img, 5 + i, 11 - i, k, Color(0.92, 0.90, 0.82))
+				_px(img, 6 + i, 11 - i, k, Color(0.80, 0.78, 0.70))
+			_blob_px(img, 4, 12, 2, k, Color(0.92, 0.90, 0.82))
+			_blob_px(img, 12, 4, 2, k, Color(0.92, 0.90, 0.82))
+		Blocks.ITEM_ARROW:
+			for i in 12:
+				_px(img, 3 + i, 13 - i, k, Color(0.60, 0.46, 0.28))
+			_blob_px(img, 12, 4, 2, k, Color(0.78, 0.80, 0.82))
+			_px(img, 3, 13, k, Color(0.90, 0.90, 0.90))
+			_px(img, 2, 12, k, Color(0.90, 0.90, 0.90))
+			_px(img, 4, 13, k, Color(0.90, 0.90, 0.90))
+			_px(img, 3, 14, k, Color(0.90, 0.90, 0.90))
+		Blocks.ITEM_STRING:
+			for i in 12:
+				_px(img, 8 + int(sin(i * 0.9) * 3.0), 4 + i, k, Color(0.92, 0.92, 0.90))
+		Blocks.ITEM_GUNPOWDER:
+			_blob_px(img, 8, 10, 3, k, Color(0.34, 0.34, 0.36))
+			_blob_px(img, 6, 8, 1, k, Color(0.48, 0.48, 0.50))
+			_blob_px(img, 10, 12, 1, k, Color(0.24, 0.24, 0.26))
+		Blocks.ITEM_SEEDS:
+			for p in [Vector2i(6, 8), Vector2i(9, 10), Vector2i(7, 12), Vector2i(10, 7)]:
+				_px(img, p.x, p.y, k, Color(0.66, 0.74, 0.32))
+				_px(img, p.x, p.y + 1, k, Color(0.48, 0.58, 0.22))
+		Blocks.ITEM_WHEAT:
+			for y in range(3, 14):
+				_px(img, 8, y, k, Color(0.72, 0.60, 0.22))
+			for p in [Vector2i(6, 5), Vector2i(10, 6), Vector2i(6, 8), Vector2i(10, 9), Vector2i(6, 11), Vector2i(10, 12)]:
+				_px(img, p.x, p.y, k, Color(0.86, 0.74, 0.28))
+				_px(img, p.x, p.y + 1, k, Color(0.70, 0.58, 0.20))
+		Blocks.ITEM_LEATHER:
+			_blob_px(img, 8, 9, 4, k, Color(0.62, 0.42, 0.24))
+			_blob_px(img, 7, 8, 2, k, Color(0.72, 0.52, 0.30))
+			_px(img, 6, 12, k, Color(0.50, 0.32, 0.18))
+		Blocks.ITEM_FEATHER:
+			for i in 10:
+				_px(img, 4 + i, 13 - i, k, Color(0.92, 0.92, 0.94))
+			for i in 6:
+				_px(img, 6 + i, 8 - i, k, Color(0.80, 0.82, 0.88))
+			_px(img, 4, 13, k, Color(0.60, 0.60, 0.62))
+		Blocks.ITEM_PORKCHOP_RAW:
+			_meat(img, k, Color(0.88, 0.52, 0.52), Color(0.72, 0.36, 0.36))
+		Blocks.ITEM_PORKCHOP_COOKED:
+			_meat(img, k, Color(0.72, 0.44, 0.24), Color(0.56, 0.32, 0.16))
+		Blocks.ITEM_BEEF_RAW:
+			_meat(img, k, Color(0.78, 0.24, 0.24), Color(0.58, 0.16, 0.16))
+		Blocks.ITEM_BEEF_COOKED:
+			_meat(img, k, Color(0.60, 0.34, 0.18), Color(0.44, 0.24, 0.12))
+		Blocks.ITEM_CHICKEN_RAW:
+			_meat(img, k, Color(0.90, 0.74, 0.66), Color(0.74, 0.58, 0.50))
+		Blocks.ITEM_CHICKEN_COOKED:
+			_meat(img, k, Color(0.80, 0.58, 0.34), Color(0.62, 0.42, 0.22))
 		_:
 			_blob_px(img, 8, 8, 4, k, Color(0.6, 0.6, 0.65))
 	return img
@@ -321,3 +411,108 @@ func _gem(img: Image, k: float, light: Color, dark: Color) -> void:
 			_px(img, x, y, k, c)
 	_px(img, 6, 6, k, Color(1, 1, 1, 0.85))
 	_px(img, 7, 6, k, Color(1, 1, 1, 0.85))
+
+
+# ================================================================ tool & armour icons
+func _tool_head(id: int) -> Color:
+	match Gear.tier_of(id):
+		0:
+			return Color(0.62, 0.46, 0.26)   # wood
+		1:
+			return Color(0.60, 0.60, 0.63)   # stone
+		2:
+			return Color(0.86, 0.86, 0.90)   # iron
+		3:
+			return Color(0.36, 0.90, 0.92)   # diamond
+	return Color(0.6, 0.6, 0.6)
+
+
+func _tool_dark(id: int) -> Color:
+	return _shade(_tool_head(id), 0.7)
+
+
+func _armor_col(id: int) -> Color:
+	match str(Gear.ARMOR[id]["set"]):
+		"leather":
+			return Color(0.60, 0.40, 0.24)
+		"iron":
+			return Color(0.82, 0.82, 0.87)
+		"diamond":
+			return Color(0.38, 0.86, 0.86)
+	return Color(0.7, 0.7, 0.7)
+
+
+func _armor_edge(id: int) -> Color:
+	return _shade(_armor_col(id), 0.68)
+
+
+## A tool drawn from its kind and material colour: a wooden handle plus a head whose
+## shape reads as pick / axe / shovel / sword / hoe at a glance.
+func _tool_icon(img: Image, k: float, kind: int, head: Color, dark: Color) -> void:
+	if kind == Gear.SWORD or kind == Gear.HOE:
+		# these are held straight: a vertical handle down the middle
+		for i in 6:
+			_px(img, 8, 15 - i, k, Color(0.45, 0.30, 0.15))
+			_px(img, 7, 15 - i, k, Color(0.55, 0.38, 0.20))
+	else:
+		# a diagonal handle from the lower left to the middle
+		for i in 12:
+			_px(img, 3 + i, 15 - i, k, Color(0.45, 0.30, 0.15))
+			_px(img, 4 + i, 15 - i, k, Color(0.55, 0.38, 0.20))
+	match kind:
+		Gear.PICK:
+			for x in range(4, 13):
+				var d := absi(x - 8)
+				_px(img, x, 2 + d, k, head if d < 4 else dark)
+				_px(img, x, 1 + d, k, dark)
+		Gear.AXE:
+			_blob_px(img, 12, 5, 3, k, head)
+			_blob_px(img, 11, 4, 2, k, dark)
+		Gear.SHOVEL:
+			_blob_px(img, 12, 4, 3, k, head)
+			_px(img, 11, 6, k, dark)
+		Gear.SWORD:
+			for y in range(3, 10):
+				_px(img, 8, y, k, head)
+				_px(img, 7, y, k, dark)
+			for x in range(5, 12):
+				_px(img, x, 10, k, Color(0.52, 0.42, 0.22))
+			_px(img, 8, 11, k, dark)
+		Gear.HOE:
+			for x in range(4, 13):
+				_px(img, x, 2, k, head)
+				_px(img, x, 3, k, dark)
+
+
+## A piece of armour drawn from its slot and material colour.
+func _armor_icon(img: Image, k: float, slot: int, c: Color, e: Color) -> void:
+	match slot:
+		Gear.SLOT_HELMET:
+			for y in range(4, 12):
+				var half := 5 - absi(y - 7)
+				for x in range(8 - half, 8 + half):
+					_px(img, x, y, k, c if y < 8 else e)
+		Gear.SLOT_CHEST:
+			for y in range(4, 13):
+				for x in range(3, 13):
+					if y < 6 and (x < 5 or x > 10):
+						continue
+					_px(img, x, y, k, c if (x + y) % 5 != 0 else e)
+		Gear.SLOT_LEGS:
+			for y in range(4, 13):
+				for x in range(5, 11):
+					if y > 8 and x > 7:
+						continue
+					_px(img, x, y, k, c if y < 8 else e)
+		Gear.SLOT_BOOTS:
+			for y in range(8, 14):
+				for x in range(4, 12):
+					_px(img, x, y, k, c if y < 12 else e)
+
+
+## A cut of meat: a rounded body with a lighter marbling highlight.
+func _meat(img: Image, k: float, body: Color, shade: Color) -> void:
+	_blob_px(img, 8, 9, 4, k, body)
+	_blob_px(img, 7, 8, 2, k, shade)
+	_px(img, 6, 11, k, shade)
+	_px(img, 10, 7, k, Color(1, 1, 1, 0.35))

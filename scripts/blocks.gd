@@ -6,8 +6,8 @@ const TILE := 16          # texture size
 const PAD := 2            # gutter used to keep mipmaps from bleeding
 const CELL := TILE + PAD * 2
 const COLS := 8
-const ROWS := 8
-const TILES := 62
+const ROWS := 16
+const TILES := 80
 
 # ---------------------------------------------------------------- block ids
 const AIR := 0
@@ -63,6 +63,18 @@ const LADDER := 44
 const FENCE := 45
 const GLASS_PANE := 46
 const DOOR := 47
+# ---------------------------------------------------------------- interaction / machines / farming
+# Block ids must stay below 256: the edit save format stores a block id in a single
+# byte (world.gd serialize_edits). A door is two ids rather than a per-position flag:
+# swapping the id carries the solidity, the texture and the persistence all at once.
+const DOOR_OPEN := 48
+const FURNACE := 49
+const FURNACE_LIT := 50        # same furnace, emissive: the id itself is the "lit" state
+const FARMLAND := 51
+const WHEAT_0 := 52            # four growth stages, each its own block id
+const WHEAT_1 := 53
+const WHEAT_2 := 54
+const WHEAT_3 := 55
 
 # ---------------------------------------------------------------- item ids
 const ITEM_STICK := 256
@@ -74,6 +86,56 @@ const ITEM_APPLE := 261
 const ITEM_BREAD := 262
 const ITEM_COPPER := 263
 const ITEM_PISTON_ARM := 264
+# ---------------------------------------------------------------- tools (5 kinds x 4 tiers)
+const ITEM_WOOD_PICK := 265
+const ITEM_WOOD_AXE := 266
+const ITEM_WOOD_SHOVEL := 267
+const ITEM_WOOD_SWORD := 268
+const ITEM_WOOD_HOE := 269
+const ITEM_STONE_PICK := 270
+const ITEM_STONE_AXE := 271
+const ITEM_STONE_SHOVEL := 272
+const ITEM_STONE_SWORD := 273
+const ITEM_STONE_HOE := 274
+const ITEM_IRON_PICK := 275
+const ITEM_IRON_AXE := 276
+const ITEM_IRON_SHOVEL := 277
+const ITEM_IRON_SWORD := 278
+const ITEM_IRON_HOE := 279
+const ITEM_DIAMOND_PICK := 280
+const ITEM_DIAMOND_AXE := 281
+const ITEM_DIAMOND_SHOVEL := 282
+const ITEM_DIAMOND_SWORD := 283
+const ITEM_DIAMOND_HOE := 284
+# ---------------------------------------------------------------- armour (3 sets x 4 pieces)
+const ITEM_LEATHER_HELMET := 285
+const ITEM_LEATHER_CHESTPLATE := 286
+const ITEM_LEATHER_LEGGINGS := 287
+const ITEM_LEATHER_BOOTS := 288
+const ITEM_IRON_HELMET := 289
+const ITEM_IRON_CHESTPLATE := 290
+const ITEM_IRON_LEGGINGS := 291
+const ITEM_IRON_BOOTS := 292
+const ITEM_DIAMOND_HELMET := 293
+const ITEM_DIAMOND_CHESTPLATE := 294
+const ITEM_DIAMOND_LEGGINGS := 295
+const ITEM_DIAMOND_BOOTS := 296
+# ---------------------------------------------------------------- mob drops / farming
+const ITEM_ROTTEN_FLESH := 297
+const ITEM_BONE := 298
+const ITEM_ARROW := 299
+const ITEM_STRING := 300
+const ITEM_GUNPOWDER := 301
+const ITEM_SEEDS := 302
+const ITEM_WHEAT := 303
+const ITEM_LEATHER := 304
+const ITEM_FEATHER := 305
+const ITEM_PORKCHOP_RAW := 306
+const ITEM_PORKCHOP_COOKED := 307
+const ITEM_BEEF_RAW := 308
+const ITEM_BEEF_COOKED := 309
+const ITEM_CHICKEN_RAW := 310
+const ITEM_CHICKEN_COOKED := 311
 
 # ---------------------------------------------------------------- tile ids
 const T_GRASS_TOP := 0
@@ -138,6 +200,17 @@ const T_LADDER := 58
 const T_FENCE := 59
 const T_DOOR := 60
 const T_PANE := 61
+# ---------------------------------------------------------------- new tiles (atlas expanded to 16 rows)
+const T_DOOR_OPEN := 62
+const T_FURNACE_TOP := 63
+const T_FURNACE_SIDE := 64
+const T_FURNACE_FRONT := 65
+const T_FURNACE_FRONT_LIT := 66
+const T_FARMLAND := 67
+const T_WHEAT_0 := 68
+const T_WHEAT_1 := 69
+const T_WHEAT_2 := 70
+const T_WHEAT_3 := 71
 
 # kind: 0 = normal cube, 1 = alpha-cutout cube (leaves), 2 = translucent (water/glass/ice),
 #       3 = crossed billboard (plants / torch), 4 = flat plate on the floor (dust, plate)
@@ -146,6 +219,7 @@ const K_CUTOUT := 1
 const K_TRANSLUCENT := 2
 const K_CROSS := 3
 const K_FLAT := 4
+const K_PANEL := 5     # a thin upright panel: a door leaf or a ladder
 
 var defs: Array = []                 # id -> definition dictionary
 var names: PackedStringArray = []
@@ -242,9 +316,15 @@ func _build_defs() -> void:
 	_def(GOLD_BLOCK, "Block of Gold", T_GOLD_BLOCK, K_CUBE, 3.0, GOLD_BLOCK)
 	_def(DIAMOND_BLOCK, "Block of Diamond", T_DIAMOND_BLOCK, K_CUBE, 4.0, DIAMOND_BLOCK)
 	_def(FENCE, "Oak Fence", T_FENCE, K_CUTOUT, 1.5, FENCE)
-	_def(LADDER, "Ladder", T_LADDER, K_CUTOUT, 0.4, LADDER)
+	_def(LADDER, "Ladder", T_LADDER, K_PANEL, 0.4, LADDER)
 	_def(GLASS_PANE, "Glass Pane", T_PANE, K_TRANSLUCENT, 0.3, GLASS_PANE)
-	_def(DOOR, "Oak Door", T_DOOR, K_CUTOUT, 2.0, DOOR)
+	# A door and a ladder are thin upright panels, not cubes and not crossed billboards:
+	# their textures are an opaque panel, so a K_CUTOUT cube drew them as a solid block,
+	# and a K_CROSS drew a visible X. Which way the panel faces is remembered per
+	# position (world.facing_override), and the mesher thins it along that axis. Solidity
+	# is still set explicitly below, so the geometry does not change how they are walked
+	# through.
+	_def(DOOR, "Oak Door", T_DOOR, K_PANEL, 2.0, DOOR)
 	_def(CHEST, "Chest", [T_CHEST_TOP, T_CHEST_TOP, T_CHEST_SIDE], K_CUBE, 2.0, CHEST)
 
 	# ---- power system. Every one of these is a real analogue of an electrical part,
@@ -263,6 +343,18 @@ func _build_defs() -> void:
 	_def(PISTON, "Piston", [T_PISTON_FACE, T_STONE, T_PISTON_SIDE], K_CUBE, 1.5, PISTON)
 	_def(PRESSURE_PLATE, "Pressure Plate", T_PLATE_OFF, K_FLAT, 0.3, PRESSURE_PLATE)
 
+	# ---- interaction / machines / farming
+	# A door has two ids: the closed one blocks, the open one does not. Flipping the id
+	# carries the solidity, the texture and the saved edit together.
+	_def(DOOR_OPEN, "Oak Door", T_DOOR, K_PANEL, 2.0, DOOR)
+	_def(FURNACE, "Furnace", [T_FURNACE_TOP, T_FURNACE_SIDE, T_FURNACE_FRONT], K_CUBE, 3.5, FURNACE)
+	_def(FURNACE_LIT, "Furnace", [T_FURNACE_TOP, T_FURNACE_SIDE, T_FURNACE_FRONT_LIT], K_CUBE, 3.5, FURNACE, 13)
+	_def(FARMLAND, "Farmland", [T_FARMLAND, T_DIRT, T_DIRT], K_CUBE, 0.6, DIRT)
+	_def(WHEAT_0, "Wheat Crop", T_WHEAT_0, K_CROSS, 0.05, -1)
+	_def(WHEAT_1, "Wheat Crop", T_WHEAT_1, K_CROSS, 0.05, -1)
+	_def(WHEAT_2, "Wheat Crop", T_WHEAT_2, K_CROSS, 0.05, -1)
+	_def(WHEAT_3, "Wheat", T_WHEAT_3, K_CROSS, 0.05, ITEM_WHEAT)
+
 	# non-block items share the same id space so an inventory slot is just an int
 	names[ITEM_STICK] = "Stick"
 	names[ITEM_COAL] = "Coal"
@@ -273,6 +365,56 @@ func _build_defs() -> void:
 	names[ITEM_BREAD] = "Bread"
 	names[ITEM_COPPER] = "Copper Ingot"
 	names[ITEM_PISTON_ARM] = "Piston Arm"
+	# tools
+	names[ITEM_WOOD_PICK] = "Wooden Pickaxe"
+	names[ITEM_WOOD_AXE] = "Wooden Axe"
+	names[ITEM_WOOD_SHOVEL] = "Wooden Shovel"
+	names[ITEM_WOOD_SWORD] = "Wooden Sword"
+	names[ITEM_WOOD_HOE] = "Wooden Hoe"
+	names[ITEM_STONE_PICK] = "Stone Pickaxe"
+	names[ITEM_STONE_AXE] = "Stone Axe"
+	names[ITEM_STONE_SHOVEL] = "Stone Shovel"
+	names[ITEM_STONE_SWORD] = "Stone Sword"
+	names[ITEM_STONE_HOE] = "Stone Hoe"
+	names[ITEM_IRON_PICK] = "Iron Pickaxe"
+	names[ITEM_IRON_AXE] = "Iron Axe"
+	names[ITEM_IRON_SHOVEL] = "Iron Shovel"
+	names[ITEM_IRON_SWORD] = "Iron Sword"
+	names[ITEM_IRON_HOE] = "Iron Hoe"
+	names[ITEM_DIAMOND_PICK] = "Diamond Pickaxe"
+	names[ITEM_DIAMOND_AXE] = "Diamond Axe"
+	names[ITEM_DIAMOND_SHOVEL] = "Diamond Shovel"
+	names[ITEM_DIAMOND_SWORD] = "Diamond Sword"
+	names[ITEM_DIAMOND_HOE] = "Diamond Hoe"
+	# armour
+	names[ITEM_LEATHER_HELMET] = "Leather Cap"
+	names[ITEM_LEATHER_CHESTPLATE] = "Leather Tunic"
+	names[ITEM_LEATHER_LEGGINGS] = "Leather Pants"
+	names[ITEM_LEATHER_BOOTS] = "Leather Boots"
+	names[ITEM_IRON_HELMET] = "Iron Helmet"
+	names[ITEM_IRON_CHESTPLATE] = "Iron Chestplate"
+	names[ITEM_IRON_LEGGINGS] = "Iron Leggings"
+	names[ITEM_IRON_BOOTS] = "Iron Boots"
+	names[ITEM_DIAMOND_HELMET] = "Diamond Helmet"
+	names[ITEM_DIAMOND_CHESTPLATE] = "Diamond Chestplate"
+	names[ITEM_DIAMOND_LEGGINGS] = "Diamond Leggings"
+	names[ITEM_DIAMOND_BOOTS] = "Diamond Boots"
+	# mob drops / farming
+	names[ITEM_ROTTEN_FLESH] = "Rotten Flesh"
+	names[ITEM_BONE] = "Bone"
+	names[ITEM_ARROW] = "Arrow"
+	names[ITEM_STRING] = "String"
+	names[ITEM_GUNPOWDER] = "Gunpowder"
+	names[ITEM_SEEDS] = "Seeds"
+	names[ITEM_WHEAT] = "Wheat"
+	names[ITEM_LEATHER] = "Leather"
+	names[ITEM_FEATHER] = "Feather"
+	names[ITEM_PORKCHOP_RAW] = "Raw Porkchop"
+	names[ITEM_PORKCHOP_COOKED] = "Cooked Porkchop"
+	names[ITEM_BEEF_RAW] = "Raw Beef"
+	names[ITEM_BEEF_COOKED] = "Steak"
+	names[ITEM_CHICKEN_RAW] = "Raw Chicken"
+	names[ITEM_CHICKEN_COOKED] = "Cooked Chicken"
 
 	for id in range(0, 512):
 		var d = defs[id]
@@ -320,6 +462,9 @@ func _build_defs() -> void:
 	solid[GLASS_PANE] = 1
 	solid[DOOR] = 1
 	occluder[DOOR] = 0
+	# an open door is walked straight through
+	solid[DOOR_OPEN] = 0
+	occluder[DOOR_OPEN] = 0
 	# air must never occlude and never block movement
 	solid[AIR] = 0
 	occluder[AIR] = 0
@@ -377,6 +522,18 @@ func food_value(id: int) -> int:
 			return 4
 		ITEM_BREAD:
 			return 6
+		ITEM_PORKCHOP_RAW:
+			return 3
+		ITEM_PORKCHOP_COOKED, ITEM_BEEF_COOKED:
+			return 8
+		ITEM_BEEF_RAW:
+			return 3
+		ITEM_CHICKEN_RAW:
+			return 2
+		ITEM_CHICKEN_COOKED:
+			return 6
+		ITEM_ROTTEN_FLESH:
+			return 4
 	return 0
 
 
@@ -916,6 +1073,87 @@ func _tile_image(id: int) -> Image:
 				img.set_pixel(TILE - 1, i, Color(0.90, 0.96, 1.0, 0.55))
 			for i in 6:
 				img.set_pixel(4 + i, 10 - i, Color(1, 1, 1, 0.45))
+		# ---- new tiles: open door, furnace, farmland, wheat stages
+		T_DOOR_OPEN:
+			_flat(img, Color(0.60, 0.44, 0.23), 0.05, 53)
+			# the panel has slid aside: the right half is the open doorway
+			for y in TILE:
+				for x in range(9, TILE):
+					img.set_pixel(x, y, Color(0, 0, 0, 0))
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.38, 0.27, 0.13))
+				img.set_pixel(0, i, Color(0.38, 0.27, 0.13))
+			for x in range(3, 9):
+				img.set_pixel(x, 5, Color(0.46, 0.33, 0.17))
+				img.set_pixel(x, 10, Color(0.46, 0.33, 0.17))
+			for yy in range(6, 10):
+				img.set_pixel(7, yy, Color(0.80, 0.74, 0.34))
+		T_FURNACE_TOP:
+			_flat(img, Color(0.42, 0.42, 0.43), 0.07, 55)
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.30, 0.30, 0.31))
+				img.set_pixel(i, TILE - 1, Color(0.30, 0.30, 0.31))
+				img.set_pixel(0, i, Color(0.30, 0.30, 0.31))
+				img.set_pixel(TILE - 1, i, Color(0.30, 0.30, 0.31))
+			for y in range(5, 11):
+				for x in range(5, 11):
+					img.set_pixel(x, y, Color(0.20, 0.20, 0.21))
+		T_FURNACE_SIDE:
+			_flat(img, Color(0.40, 0.40, 0.41), 0.09, 56)
+			for i in 20:
+				_blob(img, r.randi_range(0, 15), r.randi_range(0, 15), 1, Color(0.33, 0.33, 0.34))
+		T_FURNACE_FRONT:
+			_flat(img, Color(0.40, 0.40, 0.41), 0.08, 57)
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.30, 0.30, 0.31))
+				img.set_pixel(i, TILE - 1, Color(0.30, 0.30, 0.31))
+				img.set_pixel(0, i, Color(0.30, 0.30, 0.31))
+				img.set_pixel(TILE - 1, i, Color(0.30, 0.30, 0.31))
+			for y in range(4, 11):
+				for x in range(4, 12):
+					img.set_pixel(x, y, Color(0.15, 0.15, 0.16))
+		T_FURNACE_FRONT_LIT:
+			_flat(img, Color(0.40, 0.40, 0.41), 0.08, 57)
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.30, 0.30, 0.31))
+				img.set_pixel(i, TILE - 1, Color(0.30, 0.30, 0.31))
+				img.set_pixel(0, i, Color(0.30, 0.30, 0.31))
+				img.set_pixel(TILE - 1, i, Color(0.30, 0.30, 0.31))
+			for y in range(4, 11):
+				for x in range(4, 12):
+					var t := 1.0 - absf(float(y) - 7.0) / 4.0
+					img.set_pixel(x, y, Color(0.98, 0.50 + 0.35 * t, 0.10 + 0.18 * t))
+		T_FARMLAND:
+			_flat(img, Color(0.36, 0.25, 0.15), 0.13, 58)
+			for yy in [3, 7, 11]:
+				for x in TILE:
+					img.set_pixel(x, yy, Color(0.28, 0.19, 0.11))
+			for i in 22:
+				img.set_pixel(r.randi_range(0, 15), r.randi_range(0, 15), Color(0.44, 0.31, 0.18))
+		T_WHEAT_0:
+			img = _wheat_tile(0, 60)
+		T_WHEAT_1:
+			img = _wheat_tile(1, 61)
+		T_WHEAT_2:
+			img = _wheat_tile(2, 62)
+		T_WHEAT_3:
+			img = _wheat_tile(3, 63)
+	return img
+
+
+## One wheat plant at a given growth stage, drawn as a crossed billboard: the stalks
+## grow taller each stage and turn golden when ripe.
+func _wheat_tile(stage: int, seed: int) -> Image:
+	var img := Image.create(TILE, TILE, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var h := 5 + stage * 3
+	var col := Color(0.74, 0.64, 0.22) if stage == 3 else Color(0.36, 0.58, 0.20)
+	for cx in [4, 8, 12]:
+		for y in range(TILE - 1, TILE - 1 - h, -1):
+			img.set_pixel(cx, y, col)
+		if stage >= 2:
+			img.set_pixel(cx - 1, TILE - h, col)
+			img.set_pixel(cx, TILE - h - 1, col)
 	return img
 
 
@@ -1115,6 +1353,9 @@ func material_for_kind(k: int) -> StandardMaterial3D:
 		K_TRANSLUCENT:
 			return mat_water
 		K_CROSS:
+			return mat_cross
+		K_PANEL:
+			# cull-disabled cutout, so the panel's single quad reads from both sides
 			return mat_cross
 	return mat_opaque
 
