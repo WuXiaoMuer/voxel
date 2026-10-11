@@ -9,6 +9,10 @@ const HOTBAR_BOTTOM := 26
 ## with "/" runs it through the Commands autoload instead of being a message.
 signal chat_submitted(text: String)
 signal chat_canceled()
+## Emitted when one of the enchantment offers is pressed.
+signal enchant_choice(index: int)
+## Emitted when one of a villager's trade offers is pressed.
+signal trade_choice(index: int)
 
 var player
 var world
@@ -28,6 +32,20 @@ var hurt_flash: ColorRect
 var item_label: Label
 var toast_box: VBoxContainer
 var cursor_icon: InvSlot
+## The experience bar: a thin track above the hotbar with a green fill and the level
+## number centred on it.
+var xp_track: ColorRect
+var xp_fill: ColorRect
+var xp_level: Label
+## The enchanting table's offer panel: three buttons, one per offer.
+var enchant_panel: PanelContainer
+var enchant_buttons: Array = []
+var enchant_hint: Label
+## The villager trade panel: a title, a hint and up to four offer buttons.
+var trade_panel: PanelContainer
+var trade_buttons: Array = []
+var trade_hint: Label
+var trade_title: Label
 var vignette: TextureRect
 
 ## The item tooltip: one floating panel that follows the pointer while it is over a
@@ -63,7 +81,14 @@ var result_slot: InvSlot
 var craft_hint: Array = []
 var palette_slots: Array = []
 var palette_grid: GridContainer
-var pal_names := PackedStringArray()
+## Palette slot indices start here, well clear of every other slot space (inventory
+## 0.., hotbar 50.., crafting 100.., result 200, chest 400.., armour 430.., furnace 500..).
+## They used to start at 300, which ran straight through the armour and container ranges
+## and made `_on_inv_slot` treat an armour click as a palette click.
+const PAL_BASE := 1000
+const PAL_CATS := ["ALL", "BLOCKS", "ITEMS", "TOOLS", "FOOD", "DYES"]
+var palette_tabs: Array = []
+var _pal_cat := 0
 # chest / furnace overlay
 var _top_row: Control
 var _title_label: Label
@@ -176,6 +201,27 @@ func build(p, w, s) -> void:
 	item_label.modulate = Color(1, 1, 1, 0)
 	root.add_child(item_label)
 
+	# the experience bar, hidden until the player has any experience
+	xp_track = ColorRect.new()
+	xp_track.color = Color(0.05, 0.05, 0.07, 0.85)
+	xp_track.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	xp_track.visible = false
+	root.add_child(xp_track)
+	xp_fill = ColorRect.new()
+	xp_fill.color = Color(0.42, 0.86, 0.18)
+	xp_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	xp_fill.visible = false
+	root.add_child(xp_fill)
+	xp_level = Label.new()
+	xp_level.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	xp_level.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	xp_level.add_theme_font_size_override("font_size", PFont.S)
+	xp_level.add_theme_color_override("font_color", Color(0.55, 1.0, 0.30))
+	xp_level.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	xp_level.add_theme_constant_override("outline_size", 4)
+	xp_level.visible = false
+	root.add_child(xp_level)
+
 	toast_box = VBoxContainer.new()
 	toast_box.alignment = BoxContainer.ALIGNMENT_BEGIN
 	toast_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -206,6 +252,8 @@ func build(p, w, s) -> void:
 	_build_inventory()
 	_build_chat()
 	_build_tooltip()
+	_build_enchant()
+	_build_trade()
 	_layout()
 
 	if not I18n.changed.is_connected(_apply_language):
@@ -216,10 +264,12 @@ func build(p, w, s) -> void:
 	player.hotbar_changed.connect(refresh_hotbar)
 	player.selected_changed.connect(_on_selection_changed)
 	player.stats_changed.connect(func(_n): refresh_air())
+	player.xp_changed.connect(refresh_xp)
 	refresh_hotbar()
 	refresh_health()
 	refresh_hunger()
 	refresh_air()
+	refresh_xp()
 
 
 # ================================================================ layout
@@ -243,6 +293,14 @@ func _layout() -> void:
 	crosshair.position = Vector2(round((s.x - 45) * 0.5), round((s.y - 45) * 0.5))
 	item_label.position = Vector2(0, hy - 62)
 	item_label.size = Vector2(s.x, 30)
+	# the xp bar sits between the hotbar and the hearts, with the level number on it
+	xp_track.position = Vector2(hx + 2, hy - 11)
+	xp_track.size = Vector2(bar_w - 4, 5)
+	xp_level.position = Vector2(hx - 40, hy - 34)
+	xp_level.size = Vector2(bar_w + 80, 22)
+	refresh_xp()
+	_layout_enchant()
+	_layout_trade()
 	toast_box.position = Vector2(s.x - 330, 16)
 	toast_box.size = Vector2(314, 300)
 	debug_panel.position = Vector2(14, 14)
@@ -496,6 +554,155 @@ func _build_tooltip() -> void:
 	col.add_child(tip_desc)
 
 
+# ================================================================ enchant panel
+## The table's panel: a title, a hint and three offer buttons. It is built once and
+## refilled each time it opens, so the widget tree is stable.
+func _build_enchant() -> void:
+	# A PanelContainer, not a Panel: it grows to fit whatever is inside, so the offers can
+	# never spill past the panel's edge or be clipped on a short window. The panel is then
+	# measured and centred in `_layout_enchant`.
+	enchant_panel = PanelContainer.new()
+	enchant_panel.add_theme_stylebox_override("panel",
+		Art._sb_flat(Color(0.09, 0.07, 0.14, 0.95), 3, Color(0.52, 0.32, 0.72, 0.95)))
+	enchant_panel.visible = false
+	root.add_child(enchant_panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	vb.custom_minimum_size = Vector2(320, 0)
+	enchant_panel.add_child(_pad(vb))
+
+	var title := _lang_label("ENCHANT")
+	title.add_theme_font_size_override("font_size", PFont.M)
+	vb.add_child(title)
+
+	enchant_hint = Label.new()
+	enchant_hint.add_theme_font_size_override("font_size", PFont.S)
+	enchant_hint.add_theme_color_override("font_color", Color(0.80, 0.74, 0.94))
+	enchant_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	enchant_hint.custom_minimum_size = Vector2(320, 0)
+	vb.add_child(enchant_hint)
+
+	enchant_buttons.clear()
+	for i in 3:
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(0, 30)
+		b.pressed.connect(func() -> void: enchant_choice.emit(i))
+		vb.add_child(b)
+		enchant_buttons.append(b)
+
+
+## Wraps a control in a margin container so a panel's contents never touch its border.
+func _pad(inner: Control, amount: int = 14) -> MarginContainer:
+	var m := MarginContainer.new()
+	for side in ["left", "right", "top", "bottom"]:
+		m.add_theme_constant_override("margin_" + side, amount)
+	m.add_child(inner)
+	return m
+
+
+## Shows the panel with `offers`, an array of {name, lvl, cost} plus a hint line.
+func open_enchant(offers: Array, hint: String) -> void:
+	if enchant_panel == null:
+		return
+	enchant_hint.text = I18n.t(hint)
+	for i in 3:
+		var b: Button = enchant_buttons[i]
+		if i < offers.size():
+			var o: Dictionary = offers[i]
+			b.text = "%s %d   -   %s" % [I18n.t(str(o["name"])), int(o["lvl"]),
+				I18n.tf("Costs %d levels", [int(o["cost"])])]
+			b.disabled = false
+		else:
+			b.text = "-"
+			b.disabled = true
+	enchant_panel.visible = true
+	_layout_enchant()
+
+
+func close_enchant() -> void:
+	if enchant_panel != null:
+		enchant_panel.visible = false
+
+
+## Size the panel to its own contents and put it in the middle of the screen. Measured
+## from the content every time, so a longer offer line or a different panel makes it
+## right rather than leaving it at a size guessed at build time.
+func _layout_enchant() -> void:
+	_center_panel(enchant_panel)
+
+
+func _center_panel(panel: Control) -> void:
+	if panel == null or root == null:
+		return
+	panel.size = panel.get_combined_minimum_size()
+	panel.position = ((root.size - panel.size) * 0.5).round()
+
+
+# ================================================================ trade panel
+## A villager's stall: a title naming the trade, a hint, and one button per offer. Built
+## once and refilled on open, the same shape as the enchant panel.
+func _build_trade() -> void:
+	# PanelContainer, like the enchant panel: it fits its offers, so the low buttons can
+	# never be clipped off the bottom of a fixed-height panel.
+	trade_panel = PanelContainer.new()
+	trade_panel.add_theme_stylebox_override("panel",
+		Art._sb_flat(Color(0.10, 0.09, 0.06, 0.95), 3, Color(0.72, 0.56, 0.24, 0.95)))
+	trade_panel.visible = false
+	root.add_child(trade_panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	vb.custom_minimum_size = Vector2(380, 0)
+	trade_panel.add_child(_pad(vb))
+
+	trade_title = Label.new()
+	trade_title.add_theme_font_size_override("font_size", PFont.M)
+	vb.add_child(trade_title)
+
+	trade_hint = Label.new()
+	trade_hint.add_theme_font_size_override("font_size", PFont.S)
+	trade_hint.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
+	trade_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	trade_hint.custom_minimum_size = Vector2(380, 0)
+	vb.add_child(trade_hint)
+
+	trade_buttons.clear()
+	for i in 4:
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(0, 30)
+		b.pressed.connect(func() -> void: trade_choice.emit(i))
+		vb.add_child(b)
+		trade_buttons.append(b)
+
+
+## Shows the stall. `title` names the trade, `lines` one row per offer.
+func open_trade(title: String, lines: Array, hint: String) -> void:
+	if trade_panel == null:
+		return
+	trade_title.text = title
+	trade_hint.text = hint
+	for i in 4:
+		var b: Button = trade_buttons[i]
+		if i < lines.size():
+			b.text = str(lines[i])
+			b.disabled = false
+		else:
+			b.text = "-"
+			b.disabled = true
+	trade_panel.visible = true
+	_layout_trade()
+
+
+func close_trade() -> void:
+	if trade_panel != null:
+		trade_panel.visible = false
+
+
+func _layout_trade() -> void:
+	_center_panel(trade_panel)
+
+
 ## Wired to every inventory cell. `id` 0 means the pointer left the slot.
 func _on_slot_hover(id: int, at: Vector2) -> void:
 	if id <= 0:
@@ -603,6 +810,25 @@ func refresh_air() -> void:
 		bubbles[i].texture = Art.tex_bubble_full
 
 
+## The experience bar. Hidden until the player has gained anything, so a brand new
+## world has no empty strip over the hotbar.
+func refresh_xp() -> void:
+	if player == null or xp_track == null:
+		return
+	var lv: int = int(player.level)
+	var need: int = int(player.xp_to_next())
+	var frac := float(player.xp) / float(maxi(1, need))
+	var show := lv > 0 or int(player.xp) > 0
+	xp_track.visible = show
+	xp_fill.visible = show
+	xp_level.visible = show
+	if not show:
+		return
+	xp_fill.position = xp_track.position
+	xp_fill.size = Vector2(xp_track.size.x * clampf(frac, 0.0, 1.0), xp_track.size.y)
+	xp_level.text = str(lv)
+
+
 func flash_hurt() -> void:
 	_hurt_t = 0.55
 
@@ -689,6 +915,9 @@ func _lang_label(key: String) -> Label:
 func _apply_language() -> void:
 	for entry in _lang_labels:
 		(entry[0] as Label).text = I18n.t(str(entry[1]))
+	for i in palette_tabs.size():
+		if i < PAL_CATS.size():
+			(palette_tabs[i] as Button).text = I18n.t(PAL_CATS[i])
 	if craft_hint.size() == 2:
 		_fill_craft_hint()
 	# item names shown while the inventory is open are rebuilt on the next refresh
@@ -738,14 +967,21 @@ func _build_inventory() -> void:
 	panel.offset_bottom = -14
 	inv_root.add_child(panel)
 
+	# The whole screen scrolls, so a long creative list or a short window can never push
+	# the backpack or the hotbar off the bottom of the panel again.
+	var scroller := ScrollContainer.new()
+	scroller.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scroller.offset_left = 18
+	scroller.offset_top = 12
+	scroller.offset_right = -18
+	scroller.offset_bottom = -12
+	scroller.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	panel.add_child(scroller)
+
 	var vb := VBoxContainer.new()
-	vb.set_anchors_preset(Control.PRESET_FULL_RECT)
-	vb.offset_left = 18
-	vb.offset_top = 12
-	vb.offset_right = -18
-	vb.offset_bottom = -12
+	vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vb.add_theme_constant_override("separation", 6)
-	panel.add_child(vb)
+	scroller.add_child(vb)
 
 	var title := _lang_label("INVENTORY")
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -798,94 +1034,83 @@ func _build_inventory() -> void:
 	var hint_wrap := VBoxContainer.new()
 	hint_wrap.add_theme_constant_override("separation", 4)
 	hint_wrap.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	# it takes the slack in the row, so the two recipe columns spread out to fill the
+	# middle instead of leaving a dead gap between the crafting grid and the palette
+	hint_wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_child(hint_wrap)
 	var hint_head := _lang_label("Drag items into the grid.")
 	hint_head.add_theme_font_size_override("font_size", PFont.S)
+	# wrapped, so the caption cannot force the row wider than the window on its own: a
+	# Label's minimum width is its whole line, and this row already runs close to the edge
+	hint_head.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint_wrap.add_child(hint_head)
 	var hint_cols := HBoxContainer.new()
 	hint_cols.add_theme_constant_override("separation", 20)
 	# Bounded and scrollable: the hint list is one line per recipe, and the recipe table
 	# grew long enough that an unbounded list filled the whole panel and pushed the
-	# backpack and hotbar off the bottom of the screen.
+	# backpack and hotbar off the bottom of the screen. The columns wrap inside a fixed
+	# width too, so the row can never be forced wider than the window: an unwrapped Label
+	# reports its whole line as its minimum, and with the palette beside it that pushed
+	# the right-hand side of the panel off the screen.
 	var hint_scroll := ScrollContainer.new()
-	hint_scroll.custom_minimum_size = Vector2(360, 200)
+	hint_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hint_scroll.custom_minimum_size = Vector2(380, 168)
 	hint_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	hint_scroll.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	hint_wrap.add_child(hint_scroll)
 	hint_scroll.add_child(hint_cols)
+	hint_cols.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	craft_hint = []
 	for c in 2:
 		var col := Label.new()
 		col.add_theme_font_size_override("font_size", PFont.S)
-		col.autowrap_mode = TextServer.AUTOWRAP_OFF
+		col.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		col.custom_minimum_size = Vector2(180, 0)
+		col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		# shrink to the text and pin to the top: a filling label is centred in the row, so
+		# the shorter of the two recipe columns floated down the height of the longer one
+		col.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 		col.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 		hint_cols.add_child(col)
 		craft_hint.append(col)
 	_fill_craft_hint()
 
-	# --- creative palette
+	# --- creative palette, in tabs so a category is short enough to browse at a glance
 	var pal_wrap := VBoxContainer.new()
 	pal_wrap.add_theme_constant_override("separation", 4)
 	pal_wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_child(pal_wrap)
-	var pal_label := _lang_label("BLOCKS  (click to take a stack)")
+	var pal_label := _lang_label("CREATIVE  (click to take a stack)")
 	pal_label.add_theme_font_size_override("font_size", PFont.S)
 	pal_wrap.add_child(pal_label)
+	var tabs := HBoxContainer.new()
+	tabs.add_theme_constant_override("separation", 3)
+	pal_wrap.add_child(tabs)
+	palette_tabs.clear()
+	for i in PAL_CATS.size():
+		var tbtn := Button.new()
+		tbtn.text = I18n.t(PAL_CATS[i])
+		tbtn.add_theme_font_size_override("font_size", PFont.S)
+		tbtn.toggle_mode = true
+		tbtn.focus_mode = Control.FOCUS_NONE
+		tbtn.pressed.connect(_on_palette_tab.bind(i))
+		tabs.add_child(tbtn)
+		palette_tabs.append(tbtn)
 	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(430, 200)
+	scroll.custom_minimum_size = Vector2(330, 168)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	pal_wrap.add_child(scroll)
 	palette_grid = GridContainer.new()
-	palette_grid.columns = 7
+	# eight columns: the palette area takes the slack left over by the recipe list, and at
+	# six the cells sat in a narrow strip with dead space to their right
+	palette_grid.columns = 8
 	palette_grid.add_theme_constant_override("h_separation", 6)
 	palette_grid.add_theme_constant_override("v_separation", 6)
 	scroll.add_child(palette_grid)
-
-	for i in range(1, 56):
-		if Blocks.defs[i] == null or i == Blocks.WATER:
-			continue
-		var sl := InvSlot.new()
-		sl.index = 300 + pal_names.size()
-		sl.set_item(i, 64)
-		sl.slot_pressed.connect(_on_inv_slot)
-		sl.hover_changed.connect(_on_slot_hover)
-		palette_grid.add_child(sl)
-		palette_slots.append(sl)
-		pal_names.append("")
-
-	# the pure items too, so food, tools, armour and mob loot are reachable in creative
-	for id in [Blocks.ITEM_STICK, Blocks.ITEM_COAL, Blocks.ITEM_IRON, Blocks.ITEM_GOLD,
-			Blocks.ITEM_DIAMOND, Blocks.ITEM_COPPER, Blocks.ITEM_APPLE, Blocks.ITEM_BREAD,
-			Blocks.ITEM_WOOD_PICK, Blocks.ITEM_WOOD_AXE, Blocks.ITEM_WOOD_SHOVEL,
-			Blocks.ITEM_WOOD_SWORD, Blocks.ITEM_WOOD_HOE,
-			Blocks.ITEM_STONE_PICK, Blocks.ITEM_STONE_AXE, Blocks.ITEM_STONE_SHOVEL,
-			Blocks.ITEM_STONE_SWORD, Blocks.ITEM_STONE_HOE,
-			Blocks.ITEM_IRON_PICK, Blocks.ITEM_IRON_AXE, Blocks.ITEM_IRON_SHOVEL,
-			Blocks.ITEM_IRON_SWORD, Blocks.ITEM_IRON_HOE,
-			Blocks.ITEM_DIAMOND_PICK, Blocks.ITEM_DIAMOND_AXE, Blocks.ITEM_DIAMOND_SHOVEL,
-			Blocks.ITEM_DIAMOND_SWORD, Blocks.ITEM_DIAMOND_HOE,
-			Blocks.ITEM_LEATHER_HELMET, Blocks.ITEM_LEATHER_CHESTPLATE,
-			Blocks.ITEM_LEATHER_LEGGINGS, Blocks.ITEM_LEATHER_BOOTS,
-			Blocks.ITEM_IRON_HELMET, Blocks.ITEM_IRON_CHESTPLATE,
-			Blocks.ITEM_IRON_LEGGINGS, Blocks.ITEM_IRON_BOOTS,
-			Blocks.ITEM_DIAMOND_HELMET, Blocks.ITEM_DIAMOND_CHESTPLATE,
-			Blocks.ITEM_DIAMOND_LEGGINGS, Blocks.ITEM_DIAMOND_BOOTS,
-			Blocks.ITEM_SEEDS, Blocks.ITEM_WHEAT, Blocks.ITEM_ROTTEN_FLESH, Blocks.ITEM_BONE,
-			Blocks.ITEM_ARROW, Blocks.ITEM_STRING, Blocks.ITEM_GUNPOWDER, Blocks.ITEM_LEATHER,
-			Blocks.ITEM_FEATHER, Blocks.ITEM_PORKCHOP_RAW, Blocks.ITEM_PORKCHOP_COOKED,
-			Blocks.ITEM_BEEF_RAW, Blocks.ITEM_BEEF_COOKED,
-			Blocks.ITEM_CHICKEN_RAW, Blocks.ITEM_CHICKEN_COOKED]:
-		var it := InvSlot.new()
-		it.index = 300 + pal_names.size()
-		it.set_item(id, 64)
-		it.slot_pressed.connect(_on_inv_slot)
-		it.hover_changed.connect(_on_slot_hover)
-		palette_grid.add_child(it)
-		palette_slots.append(it)
-		pal_names.append("")
+	_fill_palette(0)
 
 	# --- armour
-	var arlab := _lang_label("ARMOUR")
+	var arlab := _lang_label("ARMOUR  (helmet, chest, legs, boots)")
 	vb.add_child(arlab)
 	var ab := HBoxContainer.new()
 	ab.add_theme_constant_override("separation", 2)
@@ -923,18 +1148,38 @@ func _build_inventory() -> void:
 		_chest_grid.add_child(csl)
 		_container_slots.append(csl)
 
+	# The furnace, laid out the way Minecraft lays one out: what you are smelting with its
+	# fuel stacked underneath, an arrow across to what came out. Three slots in a plain row
+	# said nothing about which slot was which -- and, with the paint bug fixed above, this is
+	# the first time the contents are visible at all, so the shape is what carries the
+	# meaning. The slots are still *added* in 500, 501, 502 order, because that order is what
+	# `_local_index` reads them back by.
 	_furnace_grid = HBoxContainer.new()
-	_furnace_grid.add_theme_constant_override("separation", 2)
+	_furnace_grid.add_theme_constant_override("separation", 10)
 	_furnace_grid.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	_furnace_grid.visible = false
 	_container_area.add_child(_furnace_grid)
+	var furnace_col := VBoxContainer.new()
+	furnace_col.add_theme_constant_override("separation", 2)
+	_furnace_grid.add_child(furnace_col)
 	for i in 3:
 		var fsl := InvSlot.new()
 		fsl.index = 500 + i
 		fsl.slot_pressed.connect(_on_inv_slot)
 		fsl.hover_changed.connect(_on_slot_hover)
-		_furnace_grid.add_child(fsl)
+		# 0 input and 1 fuel stack under each other on the left; 2 output sits across the
+		# arrow, vertically centred on the pair
+		if i < 2:
+			furnace_col.add_child(fsl)
+		else:
+			fsl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			_furnace_grid.add_child(fsl)
 		_container_slots.append(fsl)
+	var furnace_arrow := Label.new()
+	furnace_arrow.text = ">>"
+	furnace_arrow.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_furnace_grid.add_child(furnace_arrow)
+	_furnace_grid.move_child(furnace_arrow, 1)
 
 	# --- inventory grid
 	var invlab := _lang_label("BACKPACK")
@@ -968,6 +1213,84 @@ func _build_inventory() -> void:
 		inv_slots.append(sl)
 
 	cursor_icon.size = Vector2(SLOT, SLOT)
+
+
+# ================================================================ creative palette
+func _on_palette_tab(cat: int) -> void:
+	_fill_palette(cat)
+
+
+## Rebuilds the palette grid for one category. The slots are recreated rather than
+## hidden because a GridContainer lays out hidden children too, which would leave gaps.
+func _fill_palette(cat: int) -> void:
+	if palette_grid == null:
+		return
+	_pal_cat = cat
+	for c in palette_grid.get_children():
+		palette_grid.remove_child(c)
+		c.queue_free()
+	palette_slots.clear()
+	for id in _palette_ids(cat):
+		var sl := InvSlot.new()
+		sl.index = PAL_BASE + palette_slots.size()
+		sl.set_item(int(id), Items.max_stack(int(id)))
+		sl.slot_pressed.connect(_on_inv_slot)
+		sl.hover_changed.connect(_on_slot_hover)
+		palette_grid.add_child(sl)
+		palette_slots.append(sl)
+	for i in palette_tabs.size():
+		palette_tabs[i].button_pressed = i == cat
+
+
+## The ids behind each palette tab. BLOCKS is "every registered block", so a new block
+## shows up here the moment it is defined; the item tabs are hand-kept groups.
+func _palette_ids(cat: int) -> Array:
+	match cat:
+		1:  # blocks
+			var blocks: Array = []
+			for i in range(1, 256):
+				# the head half of a bed is placed with its foot, never handed out on its
+				# own, so it is left out of the palette rather than listed as a second "Bed"
+				if Blocks.defs[i] != null and i != Blocks.WATER and i != Blocks.BED_HEAD:
+					blocks.append(i)
+			return blocks
+		2:  # items
+			return [Blocks.ITEM_STICK, Blocks.ITEM_COAL, Blocks.ITEM_IRON, Blocks.ITEM_GOLD,
+				Blocks.ITEM_DIAMOND, Blocks.ITEM_COPPER, Blocks.ITEM_SEEDS, Blocks.ITEM_WHEAT,
+				Blocks.ITEM_STRING, Blocks.ITEM_GUNPOWDER, Blocks.ITEM_LEATHER,
+				Blocks.ITEM_BONE, Blocks.ITEM_ARROW, Blocks.ITEM_FEATHER, Blocks.ITEM_SLIME_BALL,
+				Blocks.ITEM_ENDER_PEARL, Blocks.ITEM_EMERALD, Blocks.ITEM_BUCKET,
+				Blocks.ITEM_WATER_BUCKET, Blocks.ITEM_LAVA_BUCKET]
+		3:  # tools and armour
+			return [Blocks.ITEM_WOOD_PICK, Blocks.ITEM_WOOD_AXE, Blocks.ITEM_WOOD_SHOVEL,
+				Blocks.ITEM_WOOD_SWORD, Blocks.ITEM_WOOD_HOE,
+				Blocks.ITEM_STONE_PICK, Blocks.ITEM_STONE_AXE, Blocks.ITEM_STONE_SHOVEL,
+				Blocks.ITEM_STONE_SWORD, Blocks.ITEM_STONE_HOE,
+				Blocks.ITEM_IRON_PICK, Blocks.ITEM_IRON_AXE, Blocks.ITEM_IRON_SHOVEL,
+				Blocks.ITEM_IRON_SWORD, Blocks.ITEM_IRON_HOE,
+				Blocks.ITEM_DIAMOND_PICK, Blocks.ITEM_DIAMOND_AXE, Blocks.ITEM_DIAMOND_SHOVEL,
+				Blocks.ITEM_DIAMOND_SWORD, Blocks.ITEM_DIAMOND_HOE,
+				Blocks.ITEM_LEATHER_HELMET, Blocks.ITEM_LEATHER_CHESTPLATE,
+				Blocks.ITEM_LEATHER_LEGGINGS, Blocks.ITEM_LEATHER_BOOTS,
+				Blocks.ITEM_IRON_HELMET, Blocks.ITEM_IRON_CHESTPLATE,
+				Blocks.ITEM_IRON_LEGGINGS, Blocks.ITEM_IRON_BOOTS,
+				Blocks.ITEM_DIAMOND_HELMET, Blocks.ITEM_DIAMOND_CHESTPLATE,
+				Blocks.ITEM_DIAMOND_LEGGINGS, Blocks.ITEM_DIAMOND_BOOTS]
+		4:  # food
+			return [Blocks.ITEM_APPLE, Blocks.ITEM_BREAD, Blocks.ITEM_PORKCHOP_RAW,
+				Blocks.ITEM_PORKCHOP_COOKED, Blocks.ITEM_BEEF_RAW, Blocks.ITEM_BEEF_COOKED,
+				Blocks.ITEM_CHICKEN_RAW, Blocks.ITEM_CHICKEN_COOKED, Blocks.ITEM_ROTTEN_FLESH]
+		5:  # dyes
+			var dyes: Array = []
+			for i in 16:
+				dyes.append(Blocks.ITEM_DYE_0 + i)
+			return dyes
+	var all: Array = _palette_ids(1)
+	all.append_array(_palette_ids(2))
+	all.append_array(_palette_ids(4))
+	all.append_array(_palette_ids(3))
+	all.append_array(_palette_ids(5))
+	return all
 
 
 func open_inventory(open: bool) -> void:
@@ -1047,11 +1370,22 @@ func refresh_inventory() -> void:
 		var st4: Dictionary = player.armor[i]
 		armor_slots[i].set_item(int(st4["id"]), int(st4["count"]))
 		armor_slots[i].set_dur(_dur_of(st4))
-	for i in _container_cells.size():
-		if i < _container_slots.size():
-			var st5: Dictionary = _container_cells[i]
-			_container_slots[i].set_item(int(st5["id"]), int(st5["count"]))
-			_container_slots[i].set_dur(_dur_of(st5))
+	# Container slots are painted through the same lookup a *click* on them uses, rather
+	# than by counting into `_container_cells` from zero. Counting was the whole bug: the
+	# chest's 27 slots and the furnace's 3 are all in one `_container_slots` list, chest
+	# first, so a 3-cell furnace painted slots 0..2 -- the first three *chest* slots, which
+	# are hidden in furnace mode. The furnace therefore always drew its contents as empty,
+	# and putting an item in appeared to do nothing.
+	for sl in _container_slots:
+		var cells = _array_for(sl.index)
+		var ci := _local_index(sl.index)
+		if cells == null or ci < 0 or ci >= cells.size():
+			sl.set_item(0, 0)
+			sl.set_dur(-1.0)
+			continue
+		var st5: Dictionary = cells[ci]
+		sl.set_item(int(st5["id"]), int(st5["count"]))
+		sl.set_dur(_dur_of(st5))
 	var res: Dictionary = player.craft_result()
 	result_slot.set_item(int(res["id"]), int(res["count"]))
 	_refresh_cursor()
@@ -1072,19 +1406,14 @@ func _refresh_cursor() -> void:
 
 
 func _on_inv_slot(index: int, button: int) -> void:
-	if index >= 300:
-		var i := index - 300
-		# creative palette: grab a full stack of that block
-		var id := 0
-		var n := 0
+	if index >= PAL_BASE:
+		# creative palette: grab that block or item onto the cursor
 		for c in palette_slots:
 			if c.index == index:
-				id = c.item_id
-				n = c.count
-		if id > 0:
-			player.cursor_stack = {"id": id, "count": n}
-			Sfx.play("click", -12.0)
-			_refresh_cursor()
+				player.cursor_stack = {"id": c.item_id, "count": c.count}
+				Sfx.play("click", -12.0)
+				_refresh_cursor()
+				return
 		return
 
 	# the furnace output is take-only, and an armour slot only accepts its own piece

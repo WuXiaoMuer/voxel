@@ -9,6 +9,10 @@ func max_stack(id: int) -> int:
 	# tools and armour do not stack — each copy carries its own durability
 	if Gear.is_tool(id) or Gear.is_armor(id):
 		return 1
+	# a bucket turns into its filled or empty self in place, so it is kept unstacked
+	if id == Blocks.ITEM_BUCKET or id == Blocks.ITEM_WATER_BUCKET \
+			or id == Blocks.ITEM_LAVA_BUCKET:
+		return 1
 	return 64
 
 
@@ -112,6 +116,25 @@ func _ready() -> void:
 		Blocks.ITEM_BEEF_COOKED: "Steak. The best meal in the game.",
 		Blocks.ITEM_CHICKEN_RAW: "Raw chicken. Cook it before eating.",
 		Blocks.ITEM_CHICKEN_COOKED: "Cooked chicken. Tasty and safe.",
+		Blocks.ITEM_BUCKET: "An empty bucket. Right-click water or lava to fill it.",
+		Blocks.ITEM_WATER_BUCKET: "A bucket of water. Right-click to pour it out.",
+		Blocks.ITEM_LAVA_BUCKET: "A bucket of lava. Pour it, but do not stand in it.",
+		Blocks.SLAB: "Half-height stone. Walk onto it without jumping.",
+		Blocks.SLAB_WOOD: "Half-height planks.",
+		Blocks.SLAB_COBBLE: "Half-height cobblestone.",
+		Blocks.STAIRS: "Stairs. Placed facing away from you, and climbed without a jump.",
+		Blocks.STAIRS_WOOD: "Wooden stairs.",
+		Blocks.STAIRS_COBBLE: "Cobblestone stairs.",
+		Blocks.TRAPDOOR: "A hatch. Right-click to swing it up or lay it flat.",
+		Blocks.FENCE_GATE: "A gate in a fence. Right-click to open it.",
+		Blocks.SIGN: "A sign. Right-click to write on it.",
+		Blocks.WOOL_0: "Woven cloth, dyed any of sixteen colours.",
+		Blocks.CARPET_0: "A thin covering of cloth for the floor.",
+		Blocks.BED: "Sleep in it at night to skip to morning, and to set your respawn.",
+		Blocks.ITEM_SLIME_BALL: "A blob of slime. Slimes drop them.",
+		Blocks.ITEM_ENDER_PEARL: "A pearl from an Enderman.",
+		Blocks.ITEM_EMERALD: "The villagers' coin. Earn it by trading, spend it on goods.",
+		Blocks.ENCHANTING_TABLE: "Spend levels to enchant the tool or armour you hold.",
 	}
 
 
@@ -167,27 +190,101 @@ func _iso_icon(block_id: int, size: int) -> Image:
 	if k == Blocks.K_CROSS:
 		return _flat_icon(int(d["top"]), size)
 
-	var img := _img(size, size)
-	img.fill(Color(0, 0, 0, 0))
-	var top_img: Image = Blocks.tile_images[int(d["top"])]
-	var side_img: Image = Blocks.tile_images[int(d["side"])]
-
-	var s := float(size)
-	var u := Vector2(0.866, 0.5) * (s * 0.42)
-	var v := Vector2(-0.866, 0.5) * (s * 0.42)
-	var w := Vector2(0.0, 1.0) * (s * 0.42)
-	var origin := Vector2(s * 0.5, s * 0.5 - w.y * 1.05)
-
-	var det := u.x * v.y - v.x * u.y
-	if absf(det) < 0.0001:
+	# The icon is built from the block's real shape, not from a full cube. Drawing every
+	# non-cube kind as a cube made a slab, a stair, a trapdoor and a bed all look like
+	# plain blocks in the palette and the hotbar -- the icon said nothing about the shape
+	# you were actually about to place.
+	var boxes := _icon_boxes(block_id, k)
+	if boxes.is_empty():
 		return _flat_icon(int(d["side"]), size)
 
-	# the two visible side faces, then the top face on top of them
-	_fill_para(img, origin + u, v, w, side_img, 0.80)
-	_fill_para(img, origin + v, u, w, side_img, 0.60)
-	_fill_para(img, origin, u, v, top_img, 1.0)
+	var img := _img(size, size)
+	img.fill(Color(0, 0, 0, 0))
+	_iso_boxes(img, boxes, Blocks.tile_images[int(d["top"])],
+		Blocks.tile_images[int(d["side"])])
 	_outline(img)
 	return img
+
+
+## The unit-cell boxes a kind is drawn from, in 0..1 block space. A cube is one box; the
+## rest are the shapes the mesher already builds, so the icon and the world agree.
+func _icon_boxes(block_id: int, kind: int) -> Array:
+	match kind:
+		Blocks.K_TRANSLUCENT:
+			# glass is a cube, but a pane is a thin pane: same kind, so the shape has to
+			# come from the id
+			if block_id == Blocks.GLASS_PANE:
+				return [[Vector3(0, 0, 0.40625), Vector3(1, 1, 0.59375)]]
+		Blocks.K_SLAB:
+			return [[Vector3(0, 0, 0), Vector3(1, 0.5, 1)]]
+		Blocks.K_STAIRS:
+			return [[Vector3(0, 0, 0), Vector3(1, 0.5, 1)],
+				[Vector3(0, 0.5, 0), Vector3(1, 1, 0.5)]]
+		Blocks.K_TRAPDOOR:
+			return [[Vector3(0, 0, 0), Vector3(1, 0.1875, 1)]]
+		Blocks.K_PANEL:
+			return [[Vector3(0, 0, 0.40625), Vector3(1, 1, 0.59375)]]
+		Blocks.K_CARPET, Blocks.K_FLAT:
+			return [[Vector3(0, 0, 0), Vector3(1, 0.0625, 1)]]
+		Blocks.K_BED:
+			return [[Vector3(0, 0, 0), Vector3(1, 0.5625, 1)]]
+		Blocks.K_FENCE:
+			return [[Vector3(0.4375, 0, 0.4375), Vector3(0.5625, 1, 0.5625)],
+				[Vector3(0, 0.375, 0.4375), Vector3(1, 0.5, 0.5625)],
+				[Vector3(0, 0.6875, 0.4375), Vector3(1, 0.8125, 0.5625)]]
+		Blocks.K_GATE:
+			return [[Vector3(0, 0, 0.40625), Vector3(1, 1, 0.59375)]]
+	return [[Vector3(0, 0, 0), Vector3(1, 1, 1)]]
+
+
+## A grid point (0..1 block space) in isometric screen space, before centring.
+func _iso_point(v: Vector3, k: float) -> Vector2:
+	return Vector2((v.x - v.z) * 0.866, (v.x + v.z) * 0.5 - v.y) * k
+
+
+## Draws a set of axis-aligned boxes as an isometric icon. The shapes are measured first
+## and centred, so a short slab fills the icon as well as a tall cube does, and the boxes
+## are painted back to front so a nearer piece overlaps a farther one.
+func _iso_boxes(img: Image, boxes: Array, tex_top: Image, tex_side: Image) -> void:
+	var s := float(img.get_width())
+	var k := s * 0.42
+	var lo := Vector2(1e9, 1e9)
+	var hi := Vector2(-1e9, -1e9)
+	for b in boxes:
+		var mn: Vector3 = b[0]
+		var mx: Vector3 = b[1]
+		for x in [mn.x, mx.x]:
+			for y in [mn.y, mx.y]:
+				for z in [mn.z, mx.z]:
+					var p := _iso_point(Vector3(x, y, z), k)
+					lo = lo.min(p)
+					hi = hi.max(p)
+	var off := Vector2(s * 0.5, s * 0.5) - (lo + hi) * 0.5 + Vector2(0, k * 0.05)
+	var order: Array = boxes.duplicate()
+	order.sort_custom(func(a, b2) -> bool:
+		return (a[0].x + a[0].y + a[0].z) < (b2[0].x + b2[0].y + b2[0].z))
+	for b3 in order:
+		_iso_box(img, b3[0], b3[1], k, off, tex_top, tex_side)
+
+
+func _iso_box(img: Image, mn: Vector3, mx: Vector3, k: float, off: Vector2,
+		tex_top: Image, tex_side: Image) -> void:
+	# the two faces toward the camera, then the top over both of them
+	var fx := off + _iso_point(Vector3(mx.x, mx.y, mn.z), k)
+	_fill_para(img, fx,
+		_iso_point(Vector3(mx.x, mx.y, mx.z), k) - _iso_point(Vector3(mx.x, mx.y, mn.z), k),
+		_iso_point(Vector3(mx.x, mn.y, mn.z), k) - _iso_point(Vector3(mx.x, mx.y, mn.z), k),
+		tex_side, 0.80)
+	var fz := off + _iso_point(Vector3(mn.x, mx.y, mx.z), k)
+	_fill_para(img, fz,
+		_iso_point(Vector3(mx.x, mx.y, mx.z), k) - _iso_point(Vector3(mn.x, mx.y, mx.z), k),
+		_iso_point(Vector3(mn.x, mn.y, mx.z), k) - _iso_point(Vector3(mn.x, mx.y, mx.z), k),
+		tex_side, 0.60)
+	var ft := off + _iso_point(Vector3(mn.x, mx.y, mn.z), k)
+	_fill_para(img, ft,
+		_iso_point(Vector3(mx.x, mx.y, mn.z), k) - _iso_point(Vector3(mn.x, mx.y, mn.z), k),
+		_iso_point(Vector3(mn.x, mx.y, mx.z), k) - _iso_point(Vector3(mn.x, mx.y, mn.z), k),
+		tex_top, 1.0)
 
 
 func _fill_para(img: Image, o: Vector2, e1: Vector2, e2: Vector2, tile: Image,
@@ -272,6 +369,11 @@ func _item_icon(id: int, size: int) -> Image:
 		return img
 	if Gear.is_armor(id):
 		_armor_icon(img, k, Gear.armor_slot(id), _armor_col(id), _armor_edge(id))
+		return img
+
+	# dyes: a little cloth pouch of pigment, in the colour it dyes wool
+	if id >= Blocks.ITEM_DYE_0 and id <= Blocks.ITEM_DYE_15:
+		_dye_icon(img, k, Blocks.WOOL_COLORS[id - Blocks.ITEM_DYE_0])
 		return img
 
 	match id:
@@ -368,9 +470,61 @@ func _item_icon(id: int, size: int) -> Image:
 			_meat(img, k, Color(0.90, 0.74, 0.66), Color(0.74, 0.58, 0.50))
 		Blocks.ITEM_CHICKEN_COOKED:
 			_meat(img, k, Color(0.80, 0.58, 0.34), Color(0.62, 0.42, 0.22))
+		Blocks.ITEM_BUCKET:
+			_bucket_icon(img, k, Color(0, 0, 0, 0))
+		Blocks.ITEM_WATER_BUCKET:
+			_bucket_icon(img, k, Color(0.24, 0.46, 0.88))
+		Blocks.ITEM_LAVA_BUCKET:
+			_bucket_icon(img, k, Color(0.96, 0.44, 0.08))
+		Blocks.ITEM_SLIME_BALL:
+			_blob_px(img, 8, 9, 4, k, Color(0.42, 0.78, 0.32))
+			_blob_px(img, 7, 8, 2, k, Color(0.58, 0.90, 0.44))
+			_px(img, 6, 11, k, Color(0.32, 0.64, 0.24))
+			_px(img, 9, 6, k, Color(1, 1, 1, 0.5))
+		Blocks.ITEM_ENDER_PEARL:
+			_gem(img, k, Color(0.35, 0.82, 0.74), Color(0.12, 0.44, 0.46))
+		Blocks.ITEM_EMERALD:
+			_gem(img, k, Color(0.24, 0.86, 0.40), Color(0.05, 0.52, 0.24))
 		_:
 			_blob_px(img, 8, 8, 4, k, Color(0.6, 0.6, 0.65))
 	return img
+
+
+## A small steel bucket, optionally filled. The fill is drawn just under the rim so a full
+## bucket still reads as "a bucket with something in it" rather than a solid bar.
+func _bucket_icon(img: Image, k: int, fill: Color) -> void:
+	var steel := Color(0.74, 0.76, 0.80)
+	var dark := Color(0.50, 0.52, 0.56)
+	for x in range(4, 12):
+		_px(img, x, 5, k, steel)
+	for y in range(6, 13):
+		var inset := (y - 6) / 4
+		for x in range(4 + inset, 12 - inset):
+			_px(img, x, y, k, dark if ((x + y) & 1) == 0 else steel)
+	if fill.a > 0.0:
+		for y in range(6, 10):
+			for x in range(5, 11):
+				_px(img, x, y, k, fill)
+	# the handle arc, above the rim
+	for x in range(4, 12):
+		if x < 6 or x > 9:
+			_px(img, x, 3, k, dark)
+
+
+## A small cloth pouch of dye, tied at the neck, in the colour it dyes wool.
+func _dye_icon(img: Image, k: float, col: Color) -> void:
+	var tie := Color(0.44, 0.32, 0.18)
+	_blob_px(img, 8, 10, 4, k, col)
+	_blob_px(img, 7, 9, 3, k, col.lightened(0.12))
+	# the cinched neck and the drawstring
+	for x in range(5, 12):
+		_px(img, x, 6, k, tie)
+	for y in range(4, 7):
+		_px(img, 7, y, k, tie)
+		_px(img, 8, y, k, tie)
+	_px(img, 5, 5, k, tie.lightened(0.15))
+	_px(img, 10, 5, k, tie.lightened(0.15))
+	_px(img, 6, 12, k, col.darkened(0.25))
 
 
 func _px(img: Image, x: int, y: int, k: float, c: Color) -> void:

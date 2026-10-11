@@ -85,40 +85,96 @@ class Buf:
 	## is where the slab sits on that axis, and `thickness` is how thick it is. All six
 	## faces are emitted, so it reads as a solid plank from every angle instead of a sheet.
 	func panel(base: Vector3, r: Rect2, col: Color, axis: int, pos: float, thickness: float) -> void:
+		# A thin slab with real thickness: a door leaf or a ladder, like Minecraft's
+		# 3/16-block door. The six faces are built from the same FACE_VERTS templates the
+		# cube and box paths use, with the two planes of the thin axis substituted in.
+		#
+		# That matters. These were hand-written quads once, and three of the six ran
+		# *against* Godot's winding. A door hid it -- its material is cull-disabled -- but an
+		# open trapdoor shares the opaque buffer, which culls back faces, so those three
+		# faces were thrown away and you looked straight through the board from the side.
 		var h := thickness * 0.5
 		var lo := pos - h
 		var hi := pos + h
-		var faces: Array
-		if axis == 1:
-			faces = [
-				[Vector3(0, 0, hi), Vector3(1, 0, hi), Vector3(1, 1, hi), Vector3(0, 1, hi), Vector3(0, 0, 1)],
-				[Vector3(0, 0, lo), Vector3(1, 0, lo), Vector3(1, 1, lo), Vector3(0, 1, lo), Vector3(0, 0, -1)],
-				[Vector3(1, 0, lo), Vector3(1, 0, hi), Vector3(1, 1, hi), Vector3(1, 1, lo), Vector3(1, 0, 0)],
-				[Vector3(0, 0, hi), Vector3(0, 0, lo), Vector3(0, 1, lo), Vector3(0, 1, hi), Vector3(-1, 0, 0)],
-				[Vector3(0, 1, hi), Vector3(1, 1, hi), Vector3(1, 1, lo), Vector3(0, 1, lo), Vector3(0, 1, 0)],
-				[Vector3(0, 0, lo), Vector3(1, 0, lo), Vector3(1, 0, hi), Vector3(0, 0, hi), Vector3(0, -1, 0)],
-			]
-		else:
-			faces = [
-				[Vector3(hi, 0, 0), Vector3(hi, 0, 1), Vector3(hi, 1, 1), Vector3(hi, 1, 0), Vector3(1, 0, 0)],
-				[Vector3(lo, 0, 0), Vector3(lo, 0, 1), Vector3(lo, 1, 1), Vector3(lo, 1, 0), Vector3(-1, 0, 0)],
-				[Vector3(lo, 0, 1), Vector3(hi, 0, 1), Vector3(hi, 1, 1), Vector3(lo, 1, 1), Vector3(0, 0, 1)],
-				[Vector3(lo, 0, 0), Vector3(hi, 0, 0), Vector3(hi, 1, 0), Vector3(lo, 1, 0), Vector3(0, 0, -1)],
-				[Vector3(lo, 1, 1), Vector3(hi, 1, 1), Vector3(hi, 1, 0), Vector3(lo, 1, 0), Vector3(0, 1, 0)],
-				[Vector3(lo, 0, 0), Vector3(hi, 0, 0), Vector3(hi, 0, 1), Vector3(lo, 0, 1), Vector3(0, -1, 0)],
-			]
-		var quv := [Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0)]
-		for q in faces:
-			var nrm: Vector3 = q[4]
-			var b := v.size()
+		for f in 6:
+			var nrm := Vector3(Blocks.FACE_DIRS[f])
+			var vb := v.size()
 			for i in 4:
-				var p: Vector3 = q[i]
+				var t: Vector3 = Blocks.FACE_VERTS[f][i]
+				var p := t
+				if axis == 0:
+					p.x = lo if t.x < 0.5 else hi
+				elif axis == 1:
+					p.z = lo if t.z < 0.5 else hi
+				else:
+					p.y = lo if t.y < 0.5 else hi
 				v.append(p + base)
 				n.append(nrm)
-				var t: Vector2 = quv[i]
-				uv.append(r.position + Vector2(t.x * r.size.x, t.y * r.size.y))
+				var u: Vector2 = Blocks.FACE_UV[f][i]
+				uv.append(r.position + Vector2(u.x * r.size.x, u.y * r.size.y))
 				c.append(col)
-			# the panel material is cull-disabled, so winding only needs to stay consistent
+			idx.append_array([vb, vb + 2, vb + 1, vb, vb + 3, vb + 2])
+
+
+	## An axis-aligned box between two cell-local corners, all six faces emitted. This is
+	## what the non-cube shapes are built from: a slab is one box, a stair is two. `r` is
+	## the side tile (a half-height slab passes the lower half of the tile so the grain
+	## is not squashed), and `r_cap` is the tile for the top and bottom faces, which show
+	## the full texture. Face shading matches the cube path, so a half block sits in the
+	## same light as the blocks around it.
+	func box(a: Vector3, b: Vector3, r: Rect2, col: Color, r_cap: Rect2 = Rect2()) -> void:
+		for f in 6:
+			var rr := r
+			if (f == 2 or f == 3) and r_cap.size != Vector2.ZERO:
+				rr = r_cap
+			var nrm := Vector3(Blocks.FACE_DIRS[f])
+			var sh: float = Blocks.FACE_SHADE[f]
+			var fc := Color(col.r * sh, col.g * sh, col.b * sh, col.a)
+			var base := v.size()
+			for i in 4:
+				var t: Vector3 = Blocks.FACE_VERTS[f][i]
+				v.append(Vector3(a.x + t.x * (b.x - a.x), a.y + t.y * (b.y - a.y),
+					a.z + t.z * (b.z - a.z)))
+				n.append(nrm)
+				var u: Vector2 = Blocks.FACE_UV[f][i]
+				uv.append(rr.position + Vector2(u.x * rr.size.x, u.y * rr.size.y))
+				c.append(fc)
+			idx.append_array([base, base + 2, base + 1, base, base + 3, base + 2])
+
+
+	## One fluid cell: a box whose top sits at y = h rather than y = 1, so a flowing tongue
+	## is visibly shallower than a source. `mask` selects the faces to draw (bit 0 +X,
+	## 1 -X, 2 top, 3 bottom, 4 +Z, 5 -Z, matching `Blocks.FACE_*`). Side faces crop their
+	## tile vertically to the top `h` of it, so a shallow cell is not a squashed picture of
+	## a full one, and the winding stays the same as `face()`.
+	func fluid(base: Vector3, r: Rect2, tint: Color, h: float, mask: int,
+			use_shade: bool = true) -> void:
+		for f in 6:
+			if (mask & (1 << f)) == 0:
+				continue
+			var fv: Array = Blocks.FACE_VERTS[f]
+			var fu: Array = Blocks.FACE_UV[f]
+			var nrm := Vector3(Blocks.FACE_DIRS[f])
+			# the face shade the solid path applies, so a water surface is lit like the
+			# ground it sits on. Skipped for an emissive fluid: lava is its own light and
+			# must not have its sides darkened.
+			var shade_col := tint
+			if use_shade:
+				var sh: float = Blocks.FACE_SHADE[f]
+				shade_col = Color(tint.r * sh, tint.g * sh, tint.b * sh, tint.a)
+			var b := v.size()
+			for i in 4:
+				var p: Vector3 = fv[i]
+				var t: Vector2 = fu[i]
+				if f == 2:
+					p.y = h
+				elif f != 3:
+					p.y *= h
+					t.y *= h
+				v.append(p + base)
+				n.append(nrm)
+				uv.append(r.position + Vector2(t.x * r.size.x, t.y * r.size.y))
+				c.append(shade_col)
 			idx.append_array([b, b + 2, b + 1, b, b + 3, b + 2])
 
 
@@ -145,6 +201,28 @@ var tile_override: Dictionary = {}
 var facing_override: Dictionary = {}
 ## pos -> bool, the lit state of lamps and piston arms, read when placing lights.
 var circuit_lit: Dictionary = {}
+
+## pos -> the text written on a sign. A sign is a block like any other, but the words on
+## it are state no block id can carry, so they get their own dictionary and their own
+## small save file, the way facings and fluid levels do. The floating label that shows
+## the text is a Node3D kept in step with the streaming by `sync_sign_labels`.
+var sign_text: Dictionary = {}
+var _sign_labels: Dictionary = {}    # Vector3i -> Label3D
+
+## The fluid simulation's state: pos -> level (1..7) for every cell that is *flowing*
+## rather than a source. A cell holding WATER or LAVA that is absent from here is a
+## source (level 8) and never drains -- which is what keeps the generated oceans free of
+## any per-cell record at all, and what makes a placed bucket a real source.
+##
+## Cells whose level might change are queued in `_fluid_queue`; the tick only ever looks
+## at those, so a still ocean costs nothing however big it is.
+var fluid: Dictionary = {}
+var _fluid_queue: Dictionary = {}
+var _fluid_timer := 0.0
+## How far a fluid spreads horizontally from its source. Water reaches seven cells (MC's
+## number); lava only three, so a lava lake stays a lake instead of flooding the cave.
+const FLUID_SPREAD := 7
+const LAVA_SPREAD := 3
 
 ## One chunk column: `sections` holds only the 16-tall slices that contain something,
 ## so the sky above the terrain and the stone deep underground cost nothing until
@@ -177,6 +255,8 @@ var _t_face_dirs: Array = Blocks.FACE_DIRS
 var _t_face_shade: Array = Blocks.FACE_SHADE
 var _t_air := Blocks.AIR
 var _t_bedrock := Blocks.BEDROCK
+var _t_lava := Blocks.LAVA
+var _t_liquid: PackedByteArray = Blocks.liquid
 
 signal chunk_ready(c: Vector2i)
 
@@ -282,12 +362,15 @@ func setup(s: int, distance: int) -> void:
 	# Guarded rather than unconditional: `setup` runs again on every world load, and
 	# without this the light pool grew by 14 nodes per load and the old ones were
 	# never freed.
+	#
+	# 28 rather than 14: a torch only lights what the pool can reach, so with 14 the
+	# player could stand in a lit room and watch the far half of it go dark.
 	if _lights.is_empty():
-		for i in 14:
+		for i in 28:
 			var l := OmniLight3D.new()
-			l.light_energy = 3.4
+			l.light_energy = 3.2
 			l.light_color = Color(1.0, 0.80, 0.52)
-			l.omni_range = 9.5
+			l.omni_range = 11.0
 			l.omni_attenuation = 0.85
 			l.shadow_enabled = false
 			l.visible = false
@@ -316,6 +399,14 @@ func reset() -> void:
 	tile_override.clear()
 	facing_override.clear()
 	circuit_lit.clear()
+	fluid.clear()
+	_fluid_queue.clear()
+	_fluid_timer = 0.0
+	sign_text.clear()
+	for lb in _sign_labels.values():
+		if is_instance_valid(lb):
+			lb.queue_free()
+	_sign_labels.clear()
 	for l in _lights:
 		if is_instance_valid(l):
 			l.queue_free()
@@ -345,7 +436,7 @@ func _free_nodes(ch: Dictionary) -> void:
 		return
 	for sec in ch["nodes"]:
 		var pair: Dictionary = ch["nodes"][sec]
-		for key in ["solid", "trans"]:
+		for key in ["solid", "trans", "lava"]:
 			var n = pair.get(key)
 			if n != null and is_instance_valid(n):
 				n.queue_free()
@@ -390,8 +481,191 @@ func is_solid(x: int, y: int, z: int) -> bool:
 	return Blocks.solid[get_block(x, y, z)] == 1
 
 
+## The vertical span a block occupies inside its own cell, as (bottom, top) in 0..1, or
+## zero when the cell does not block the player. Full cubes are (0, 1); a slab is half a
+## cell, a carpet a sixteenth. Which half a slab sits in, and which way a trapdoor is
+## hinged, come from the per-position facing record, so this cannot be a plain table.
+##
+## Collision is what makes stairs usable: with a half-height span a run of stairs is
+## climbed by the ordinary walking step-up, exactly as it is in Minecraft.
+func collide_span(x: int, y: int, z: int) -> Vector2:
+	var id := get_block(x, y, z)
+	if id == Blocks.AIR or Blocks.solid[id] != 1:
+		return Vector2.ZERO
+	match Blocks.kind[id]:
+		Blocks.K_SLAB:
+			var f: Vector3i = facing_override.get(Vector3i(x, y, z), Vector3i(0, 0, 1))
+			return Vector2(0.5, 1.0) if f.y > 0 else Vector2(0.0, 0.5)
+		Blocks.K_STAIRS:
+			return Vector2(0.0, 0.5)
+		Blocks.K_TRAPDOOR:
+			var f2: Vector3i = facing_override.get(Vector3i(x, y, z), Vector3i(0, 0, 1))
+			return Vector2(0.8125, 1.0) if f2.y > 0 else Vector2(0.0, 0.1875)
+		Blocks.K_BED:
+			return Vector2(0.0, 0.5625)
+	return Vector2(0.0, 1.0)
+
+
 func is_liquid(x: int, y: int, z: int) -> bool:
 	return Blocks.liquid[get_block(x, y, z)] == 1
+
+
+## Lava is a liquid too, so `is_liquid` alone cannot tell the two apart -- and the player
+## swims in one of them and burns in the other.
+func is_lava(x: int, y: int, z: int) -> bool:
+	return get_block(x, y, z) == Blocks.LAVA
+
+
+## A fluid cell is a *source* when nothing has recorded a level for it: it never drains.
+## A bucket places a source, and worldgen fills the oceans with them.
+func is_fluid_source(pos: Vector3i) -> bool:
+	return not fluid.has(pos)
+
+
+# ================================================================ fluids
+## The fluid simulation. It is a pull-based cellular automaton rather than a push one:
+## each queued cell recomputes its own level from its neighbours, so it does not matter
+## in what order the queue is drained and a value can never be written twice in one tick.
+##
+## A source is level 8 and never changes; everything else is `min(limit, best support)`,
+## where horizontal support is `neighbour - 1` (so a run decays one per block, exactly
+## like the power wires) and vertical support is the level of the cell above (a falling
+## column keeps its strength). A cell whose support reaches zero is gone -- which is what
+## makes a spill dry up when the bucket that started it is taken away.
+##
+## Nothing here scans the world: only cells in `_fluid_queue` are ever looked at, so a
+## still ocean costs nothing no matter how large it is.
+const _FLUID_DIRS := [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
+
+
+## Wakes a cell and its six neighbours. Called from every edit, and by the tick itself.
+func wake_fluid(pos: Vector3i) -> void:
+	_fluid_queue[pos] = true
+	for d in _NEIGHBOURS6:
+		_fluid_queue[pos + d] = true
+
+
+func _mark_dirty_pos(pos: Vector3i) -> void:
+	var c := Vector2i(pos.x >> 4, pos.z >> 4)
+	if chunks.has(c):
+		_mark_dirty(c, pos.y >> 4)
+
+
+## The sim's own write. `silent` keeps it out of the circuit solver, which must not be
+## re-entered from a write the solver did not make.
+func _set_fluid(pos: Vector3i, id: int) -> void:
+	set_block(pos.x, pos.y, pos.z, id, true, true)
+
+
+func _fluid_limit(is_lava: bool) -> int:
+	return LAVA_SPREAD if is_lava else FLUID_SPREAD
+
+
+## One fluid tick on its own slow clock, over a bounded slice of the queue. A big spill
+## therefore spreads over several ticks instead of stalling a frame.
+func step_fluids(delta: float) -> void:
+	_fluid_timer -= delta
+	if _fluid_timer > 0.0 or _fluid_queue.is_empty():
+		return
+	_fluid_timer = 0.2
+	var budget := 512
+	var todo: Array = _fluid_queue.keys()
+	_fluid_queue.clear()
+	for pos in todo:
+		if budget <= 0:
+			_fluid_queue[pos] = true
+			continue
+		budget -= 1
+		_fluid_tick_cell(pos)
+
+
+func _fluid_tick_cell(pos: Vector3i) -> void:
+	var id := get_block(pos.x, pos.y, pos.z)
+	if id == Blocks.AIR or Blocks.kind[id] == Blocks.K_CROSS:
+		_fluid_spread_into(pos)
+		return
+	if _t_liquid[id] != 1:
+		return
+	var is_lava := id == _t_lava
+
+	# water meeting lava sets it: a source freezes to obsidian, a flowing tongue to plain
+	# cobblestone. Checked before the source early-out, because a source is exactly the
+	# case that must still react.
+	if is_lava and _touches_water(pos):
+		_set_fluid(pos, Blocks.OBSIDIAN if is_fluid_source(pos) else Blocks.COBBLESTONE)
+		fluid.erase(pos)
+		wake_fluid(pos)
+		return
+
+	if is_fluid_source(pos):
+		wake_fluid(pos)
+		return
+
+	var lvl := int(fluid.get(pos, 1))
+	var support := _fluid_support(pos, id, is_lava)
+	if support <= 0:
+		fluid.erase(pos)
+		_set_fluid(pos, Blocks.AIR)
+		wake_fluid(pos)
+		return
+	if support != lvl:
+		fluid[pos] = support
+		_mark_dirty_pos(pos)
+	wake_fluid(pos)
+
+
+## How strong a flowing cell's supply is. Vertical support carries the level of the cell
+## above (a waterfall keeps its strength all the way down); horizontal support is the
+## best neighbour's level minus one. Capped at the fluid's reach, which is what stops a
+## falling column from turning into an endless source.
+func _fluid_support(pos: Vector3i, id: int, is_lava: bool) -> int:
+	var limit := _fluid_limit(is_lava)
+	var above := pos + Vector3i(0, 1, 0)
+	if get_block(above.x, above.y, above.z) == id:
+		return mini(limit, int(fluid.get(above, 8)))
+	var best := 0
+	for d in _FLUID_DIRS:
+		var n: Vector3i = pos + d
+		if get_block(n.x, n.y, n.z) == id:
+			best = maxi(best, int(fluid.get(n, 8)) - 1)
+	return mini(limit, best)
+
+
+## An empty (or plant-filled) cell that a neighbour may be about to flood.
+func _fluid_spread_into(pos: Vector3i) -> void:
+	var lvl := _fluid_fill_level(pos, Blocks.WATER, false)
+	var id := Blocks.WATER
+	var lava_lvl := _fluid_fill_level(pos, Blocks.LAVA, true)
+	if lava_lvl > lvl:
+		lvl = lava_lvl
+		id = Blocks.LAVA
+	if lvl <= 0:
+		return
+	# the level has to be recorded before the block lands, or the write would be taken
+	# for a fresh source and the tongue would never dry
+	fluid[pos] = lvl
+	_set_fluid(pos, id)
+
+
+func _fluid_fill_level(pos: Vector3i, id: int, is_lava: bool) -> int:
+	var limit := _fluid_limit(is_lava)
+	var above := pos + Vector3i(0, 1, 0)
+	if get_block(above.x, above.y, above.z) == id:
+		return mini(limit, int(fluid.get(above, 8)))
+	var best := 0
+	for d in _FLUID_DIRS:
+		var n: Vector3i = pos + d
+		if get_block(n.x, n.y, n.z) == id:
+			best = maxi(best, int(fluid.get(n, 8)) - 1)
+	return mini(limit, best)
+
+
+func _touches_water(pos: Vector3i) -> bool:
+	for d in _NEIGHBOURS6:
+		var n: Vector3i = pos + d
+		if get_block(n.x, n.y, n.z) == Blocks.WATER:
+			return true
+	return false
 
 
 ## One past the highest occluder in that column, or MIN_Y when there is none.
@@ -417,6 +691,12 @@ signal block_changed(pos: Vector3i, id: int)
 signal container_opened(pos: Vector3i)
 signal furnace_opened(pos: Vector3i)
 signal table_opened(pos: Vector3i)
+## Emitted when a sign is right-clicked, so the UI can ask for its text.
+signal sign_opened(pos: Vector3i)
+## Emitted when a bed is right-clicked, so main can try to sleep.
+signal bed_used(pos: Vector3i)
+## Emitted when an enchanting table is right-clicked.
+signal enchant_opened(pos: Vector3i)
 
 var authority = null
 var containers = null       # the chest/furnace store, injected by main
@@ -472,9 +752,98 @@ func interact_block(pos: Vector3i, id: int) -> bool:
 		Blocks.CRAFTING_TABLE:
 			table_opened.emit(pos)
 			return true
+		Blocks.TRAPDOOR, Blocks.TRAPDOOR_OPEN:
+			_toggle_trapdoor(pos)
+			return true
+		Blocks.FENCE_GATE, Blocks.FENCE_GATE_OPEN:
+			_toggle_gate(pos)
+			return true
+		Blocks.SIGN, Blocks.SIGN_WALL:
+			sign_opened.emit(pos)
+			return true
+		Blocks.BED, Blocks.BED_HEAD:
+			bed_used.emit(pos)
+			return true
+		Blocks.ENCHANTING_TABLE:
+			enchant_opened.emit(pos)
+			return true
 	if circuit != null:
 		return circuit.interact(pos, id)
 	return false
+
+
+## A trapdoor swings on its hinge the way a door does: closed becomes the upright board,
+## open becomes the flat hatch. The facing (which edge the hinge is on, and whether the
+## hatch is mounted on the floor or the ceiling) is already recorded, so the id swap is
+## all that changes.
+func _toggle_trapdoor(pos: Vector3i) -> void:
+	var open := get_block(pos.x, pos.y, pos.z) == Blocks.TRAPDOOR_OPEN
+	set_block(pos.x, pos.y, pos.z, Blocks.TRAPDOOR if open else Blocks.TRAPDOOR_OPEN)
+
+
+## A gate is a door in a fence: closed it blocks, open it swings aside.
+func _toggle_gate(pos: Vector3i) -> void:
+	var open := get_block(pos.x, pos.y, pos.z) == Blocks.FENCE_GATE_OPEN
+	set_block(pos.x, pos.y, pos.z, Blocks.FENCE_GATE if open else Blocks.FENCE_GATE_OPEN)
+
+
+## The text on a sign, or "" when it has none. An empty string clears the sign.
+func sign_text_at(pos: Vector3i) -> String:
+	return str(sign_text.get(pos, ""))
+
+
+func set_sign_text(pos: Vector3i, text: String) -> void:
+	var t := text.strip_edges()
+	if t == "":
+		sign_text.erase(pos)
+		_remove_sign_label(pos)
+	else:
+		sign_text[pos] = t
+		_refresh_sign_label(pos)
+
+
+## Keeps the floating labels in step with the camera: a label is created for every sign
+## within streaming range and freed for one that is out of range or no longer has text.
+## Called from main every so often, not per frame, because the set of signs is small and
+## walking it is not.
+func sync_sign_labels(center: Vector3) -> void:
+	var reach := float((render_distance + 1) * CHUNK)
+	for pos in sign_text.keys():
+		var near := (Vector3(pos) + Vector3(0.5, 0.5, 0.5)).distance_to(center) <= reach
+		if not near:
+			_remove_sign_label(pos)
+		elif not _sign_labels.has(pos):
+			_refresh_sign_label(pos)
+	for pos in _sign_labels.keys():
+		if not sign_text.has(pos):
+			_remove_sign_label(pos)
+
+
+func _refresh_sign_label(pos: Vector3i) -> void:
+	_remove_sign_label(pos)
+	if not sign_text.has(pos):
+		return
+	var lb := Label3D.new()
+	lb.text = str(sign_text[pos])
+	lb.position = Vector3(pos) + Vector3(0.5, 0.86, 0.5)
+	lb.pixel_size = 0.016
+	lb.modulate = Color(0.08, 0.06, 0.04)
+	lb.outline_size = 6
+	lb.outline_modulate = Color(0.90, 0.84, 0.68, 0.55)
+	lb.no_depth_test = false
+	lb.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lb.render_priority = 1
+	lb.width = 200
+	add_child(lb)
+	_sign_labels[pos] = lb
+
+
+func _remove_sign_label(pos: Vector3i) -> void:
+	if _sign_labels.has(pos):
+		var lb = _sign_labels[pos]
+		if is_instance_valid(lb):
+			lb.queue_free()
+		_sign_labels.erase(pos)
 
 
 ## A door is two blocks tall and swings on its hinge. Opening turns the leaf a quarter
@@ -568,14 +937,21 @@ func apply_edit(pos: Vector3i, id: int, record: bool = true, silent: bool = fals
 	if not _tile_can_change(old):
 		tile_override.erase(pos)
 
-	# a thin panel remembers which way it faces. A fresh placement takes it from where
-	# the placer looked; a door being opened or closed keeps the one it has, because the
-	# toggle has already written the rotated direction it wants.
-	if Blocks.kind[id] == Blocks.K_PANEL:
-		if not facing_override.has(pos) or Blocks.kind[old] != Blocks.K_PANEL:
+	# a thin panel or a non-cube shape remembers which way it faces: a fresh placement
+	# takes it from where the placer looked (or from the explicit facing the placer set
+	# for a slab's half or a trapdoor's hinge); a door being opened, or a stair whose id
+	# does not change, keeps the one it has.
+	if Blocks.uses_facing(Blocks.kind[id]):
+		if not facing_override.has(pos) or not Blocks.uses_facing(Blocks.kind[old]):
 			facing_override[pos] = _panel_facing()
 	else:
 		facing_override.erase(pos)
+
+	# breaking a sign takes its words with it, so a new sign in the same cell does not
+	# inherit the last one's text
+	if id == Blocks.AIR and (old == Blocks.SIGN or old == Blocks.SIGN_WALL):
+		sign_text.erase(pos)
+		_remove_sign_label(pos)
 
 	# keep the circuit solver's picture of the world in step, then let it re-solve
 	# around this position. Never from a silent write: that write came *from* the
@@ -589,6 +965,16 @@ func apply_edit(pos: Vector3i, id: int, record: bool = true, silent: bool = fals
 	elif circuit != null:
 		if Blocks.circuit_kind(id) == 0:
 			circuit.unregister(pos)
+
+	# fluid bookkeeping. A cell that stops being a fluid drops its level; a fluid placed
+	# by hand (a bucket) is a *source*, so it must not inherit a level from whatever
+	# flowed here before. The sim's own writes are silent and manage their own levels.
+	if _t_liquid[id] != 1:
+		fluid.erase(pos)
+	elif not silent:
+		fluid.erase(pos)
+	if not silent:
+		wake_fluid(pos)
 
 	_recompute_column(ch, lx, lz)
 	_dirty_cells_around(pos)
@@ -614,10 +1000,14 @@ func _facing_for_place(pos: Vector3i, id: int) -> Vector3i:
 	return circuit.facing_from_look(look)
 
 
-## Which way a thin panel is placed: the placer's look snapped to the nearest horizontal
-## axis, so a door you place facing north has its leaf across the east-west axis. Falls
-## back to +Z when there is no look (a load, or a test).
+## Which way a thin panel is placed: the explicit facing the placer set for this one
+## placement if there is one (a slab's half, a trapdoor's hinge, a stair's ascent),
+## otherwise the placer's look snapped to the nearest horizontal axis, so a door you
+## place facing north has its leaf across the east-west axis. Falls back to +Z when
+## there is no look (a load, or a test).
 func _panel_facing() -> Vector3i:
+	if _place_facing != Vector3i.ZERO:
+		return _place_facing
 	var look := _place_look
 	if look.length_squared() < 0.0001:
 		return Vector3i(0, 0, 1)
@@ -629,10 +1019,25 @@ func _panel_facing() -> Vector3i:
 ## Set by the player just before placing, so the world knows which way the placer
 ## was looking without holding a reference to the player.
 var _place_look := Vector3.ZERO
+## Set by the player just before placing a block whose exact half or hinge matters: a
+## slab mounted on a ceiling (y = 1) or a trapdoor hinged on an edge. Zero means "derive
+## it from the look", which is what a door and a ladder do.
+var _place_facing := Vector3i.ZERO
 
 
 func set_place_look(dir: Vector3) -> void:
 	_place_look = dir
+
+
+func set_place_facing(v: Vector3i) -> void:
+	_place_facing = v
+
+
+## Which way the placement in flight faces, by the same rule `apply_edit` uses. A caller
+## that needs to place a companion block (a bed's head, two cells on) asks this instead of
+## re-deriving the facing and getting a different answer.
+func placement_facing() -> Vector3i:
+	return _panel_facing()
 
 
 ## Sections of a chunk, highest first. Sorting is what makes "walk down from the top"
@@ -1038,7 +1443,7 @@ func _finish_buried(c: Vector2i, sec: int) -> void:
 	if not chunks.has(c):
 		return
 	_attach_mesh({"c": c, "sec": sec, "solid": Buf.new(), "extra": Buf.new(),
-		"trans": Buf.new(), "cross": Buf.new(), "flat": Buf.new(),
+		"trans": Buf.new(), "cross": Buf.new(), "flat": Buf.new(), "lava": Buf.new(),
 		"srev": int(chunks[c]["srev"].get(sec, 0))})
 
 
@@ -1163,7 +1568,7 @@ func _make_payload(c: Vector2i, sec: int) -> Dictionary:
 			hm.append(chunks[cc]["hmap"] if chunks.has(cc) else null)
 	return {"c": c, "sec": sec, "nb": nb, "hm": hm,
 		"srev": int(chunks[c]["srev"].get(sec, 0)), "tiles": _local_tiles(c, sec),
-		"facing": _local_facing(c, sec)}
+		"facing": _local_facing(c, sec), "fluid": _local_fluid(c, sec)}
 
 
 ## The tile overrides that fall inside one section, keyed by section-local position.
@@ -1200,6 +1605,24 @@ func _local_facing(c: Vector2i, sec: int) -> Dictionary:
 		if (pos.y >> 4) != sec:
 			continue
 		out[Vector3i(pos.x - x0, pos.y & 15, pos.z - z0)] = facing_override[pos]
+	return out
+
+
+## The flowing-fluid levels inside one section, keyed by section-local position for the
+## same reason as tiles and facings: the worker must never read the live `fluid`
+## dictionary, which the main thread rewrites on every tick.
+func _local_fluid(c: Vector2i, sec: int) -> Dictionary:
+	var out: Dictionary = {}
+	if fluid.is_empty():
+		return out
+	var x0 := c.x << 4
+	var z0 := c.y << 4
+	for pos in fluid.keys():
+		if pos.x < x0 or pos.x >= x0 + CHUNK or pos.z < z0 or pos.z >= z0 + CHUNK:
+			continue
+		if (pos.y >> 4) != sec:
+			continue
+		out[Vector3i(pos.x - x0, pos.y & 15, pos.z - z0)] = int(fluid[pos])
 	return out
 
 
@@ -1240,9 +1663,13 @@ func _mesh_job(p: Dictionary) -> void:
 	var ox: int = p["c"].x * CHUNK
 	var oz: int = p["c"].y * CHUNK
 	var oy: int = sec * SEC
-	var bufs := [Buf.new(), Buf.new(), Buf.new(), Buf.new(), Buf.new()]
+	# six buffers: solid, cutout, translucent, cross, flat, lava. Lava needs its own
+	# because it is opaque where water is not, so it cannot share the water material.
+	var bufs := [Buf.new(), Buf.new(), Buf.new(), Buf.new(), Buf.new(), Buf.new()]
 	var tiles: Dictionary = p["tiles"]
 	var facings: Dictionary = p.get("facing", {})
+	var fluids: Dictionary = p.get("fluid", {})
+	var liq_tab := _t_liquid
 	# Local aliases for the tables this loop hammers. Reading them off `self` is fine, but
 	# a local is one less indirection in the innermost of the 4096 iterations.
 	var occ_tab := _t_occluder
@@ -1259,6 +1686,35 @@ func _mesh_job(p: Dictionary) -> void:
 					continue
 				var k := kind_tab[id]
 				var col_light := _sky_light(p, ox + lx, oz + lz, oy + ly)
+				var lpos := Vector3(lx, ly, lz)
+				if liq_tab[id] == 1:
+					# A fluid cell is a box that stops at its own level, not a full cube.
+					# A face is drawn unless the neighbour hides it: sides go against an
+					# occluder or the same fluid, the surface goes under the same fluid,
+					# and the underside goes onto the same fluid or a solid. A source (a
+					# cell with no recorded level) is full height, which is why the oceans
+					# mesh exactly as they always did.
+					var is_lava := id == _t_lava
+					var lvl := int(fluids.get(Vector3i(lx, ly, lz), 8))
+					var fh := 1.0 if is_lava else float(lvl) / 8.0
+					var mask := 0
+					for f in [0, 1, 4, 5]:
+						var fdir: Vector3i = dirs[f]
+						var nid := _nb_get(p, lx + fdir.x, ly + fdir.y, lz + fdir.z)
+						if occ_tab[nid] != 1 and nid != id:
+							mask |= 1 << f
+					var upid := _nb_get(p, lx, ly + 1, lz)
+					if occ_tab[upid] != 1 and upid != id:
+						mask |= 1 << 2
+					var dnid := _nb_get(p, lx, ly - 1, lz)
+					if occ_tab[dnid] != 1 and dnid != id:
+						mask |= 1 << 3
+					if mask != 0:
+						var fcol := Color(1.0, 1.0, 1.0) if emit_tab[id] > 0 \
+							else Color(col_light, col_light, col_light)
+						bufs[5 if is_lava else 2].fluid(Vector3(lx, ly, lz),
+							_tile_rect(_t_tile_top[id]), fcol, fh, mask, emit_tab[id] == 0)
+					continue
 				if k == Blocks.K_CROSS:
 					bufs[3].cross(Vector3(lx, ly, lz),
 						_tile_rect(_tile_of(tiles, lx, ly, lz, id)),
@@ -1294,8 +1750,170 @@ func _mesh_job(p: Dictionary) -> void:
 						_tile_rect(_tile_of(tiles, lx, ly, lz, id, _t_tile_top[id])),
 						Color(plit, plit, plit), axis, plane, 0.1875)
 					continue
+				if k == Blocks.K_SLAB:
+					# a half-height box. `fd.y > 0` means the top half, which is what a
+					# slab placed on a ceiling gets; the sides pass the matching half of
+					# the tile so the grain is not stretched, while the top face shows
+					# the whole texture.
+					var slit := col_light
+					if emit_tab[id] > 0:
+						slit = 1.0
+					var sfd: Vector3i = facings.get(Vector3i(lx, ly, lz), Vector3i(0, 0, 1))
+					var sr := _tile_rect(_tile_of(tiles, lx, ly, lz, id))
+					var sc := Color(slit, slit, slit)
+					if sfd.y > 0:
+						bufs[0].box(lpos + Vector3(0, 0.5, 0), lpos + Vector3(1, 1, 1),
+							_half_rect(sr, false), sc, sr)
+					else:
+						bufs[0].box(lpos, lpos + Vector3(1, 0.5, 1),
+							_half_rect(sr, true), sc, sr)
+					continue
+				if k == Blocks.K_STAIRS:
+					# the lower half of the cell plus the upper half of whichever side the
+					# stair rises toward (its facing), giving the classic L profile. The
+					# collision is treated as the lower half only, so a run of stairs is
+					# climbed by the ordinary walking step-up rather than a jump.
+					var tlit2 := col_light
+					if emit_tab[id] > 0:
+						tlit2 = 1.0
+					var tfd: Vector3i = facings.get(Vector3i(lx, ly, lz), Vector3i(0, 0, 1))
+					var tr := _tile_rect(_tile_of(tiles, lx, ly, lz, id))
+					var tc := Color(tlit2, tlit2, tlit2)
+					bufs[0].box(lpos, lpos + Vector3(1, 0.5, 1), _half_rect(tr, true), tc, tr)
+					var qa := lpos + Vector3(0, 0.5, 0)
+					var qb := lpos + Vector3(1, 1, 1)
+					if tfd.x > 0:
+						qa.x = lpos.x + 0.5
+					elif tfd.x < 0:
+						qb.x = lpos.x + 0.5
+					elif tfd.z > 0:
+						qa.z = lpos.z + 0.5
+					else:
+						qb.z = lpos.z + 0.5
+					bufs[0].box(qa, qb, _half_rect(tr, false), tc, tr)
+					continue
+				if k == Blocks.K_TRAPDOOR:
+					# a hatch: flat and thin when closed, an upright board hinged on the
+					# edge it faces when open. `fd.y > 0` is a ceiling-mounted hatch.
+					var tlit3 := col_light
+					if emit_tab[id] > 0:
+						tlit3 = 1.0
+					var hfd: Vector3i = facings.get(Vector3i(lx, ly, lz), Vector3i(0, 0, 1))
+					var hr := _tile_rect(_tile_of(tiles, lx, ly, lz, id))
+					var hc := Color(tlit3, tlit3, tlit3)
+					if id == Blocks.TRAPDOOR_OPEN:
+						var haxis := 1
+						var hcomp := float(hfd.z)
+						if hfd.x != 0:
+							haxis = 0
+							hcomp = float(hfd.x)
+						bufs[0].panel(lpos, hr, hc, haxis, 0.5 + 0.40 * hcomp, 0.1875)
+					elif hfd.y > 0:
+						bufs[0].box(lpos + Vector3(0, 0.8125, 0), lpos + Vector3(1, 1, 1),
+							hr, hc, hr)
+					else:
+						bufs[0].box(lpos, lpos + Vector3(1, 0.1875, 1), hr, hc, hr)
+					continue
+				if k == Blocks.K_CARPET:
+					# a 1/16 layer of cloth laid over the block below
+					var clit := col_light
+					if emit_tab[id] > 0:
+						clit = 1.0
+					var cr := _tile_rect(_tile_of(tiles, lx, ly, lz, id))
+					bufs[0].box(lpos, lpos + Vector3(1, 0.0625, 1), cr,
+						Color(clit, clit, clit), cr)
+					continue
+				if k == Blocks.K_BED:
+					# Three pieces, not one box, because one box is exactly what made a
+					# bed look like a red block with a picture of a pillow on all six
+					# faces. The frame is inset so it reads as legs under an overhanging
+					# mattress, and the pillow is a real lump at the head end -- so the
+					# silhouette says "bed" before the texture does.
+					var bed_lit := col_light
+					if emit_tab[id] > 0:
+						bed_lit = 1.0
+					var bt := _tile_rect(_tile_of(tiles, lx, ly, lz, id))
+					var bs := _tile_rect(Blocks.T_BED_SIDE)
+					var bp := _tile_rect(Blocks.T_BED_PILLOW)
+					var bwood := _tile_rect(Blocks.T_PLANKS)
+					var bcolr := Color(bed_lit, bed_lit, bed_lit)
+					var bfd: Vector3i = facings.get(Vector3i(lx, ly, lz), Vector3i(0, 0, 1))
+					# the frame: a small plinth under the mattress, inset all round
+					bufs[0].box(lpos + Vector3(0.0625, 0.0, 0.0625),
+						lpos + Vector3(0.9375, 0.1875, 0.9375), bwood, bcolr, bwood)
+					# the mattress: full footprint, overhanging the frame, blanket on top
+					bufs[0].box(lpos + Vector3(0, 0.1875, 0),
+						lpos + Vector3(1, 0.5625, 1), bs, bcolr, bt)
+					# the pillow, on the head half only. A bed is two cells now: the foot is
+					# the same mattress without a pillow, and the pillow is what tells the
+					# two ends of the bed apart. `bfd` is where the placer was looking, so
+					# the head is the far end from whoever put it down.
+					if id == Blocks.BED_HEAD:
+						var along_x := bfd.x != 0
+						var pmin := 0.6875
+						var pmax := 0.9375
+						if (along_x and bfd.x < 0) or (not along_x and bfd.z < 0):
+							pmin = 1.0 - 0.9375
+							pmax = 1.0 - 0.6875
+						var a_lo := Vector3(0.125, 0.5625, 0.125)
+						var a_hi := Vector3(0.875, 0.625, 0.875)
+						if along_x:
+							a_lo.x = pmin
+							a_hi.x = pmax
+						else:
+							a_lo.z = pmin
+							a_hi.z = pmax
+						bufs[0].box(lpos + a_lo, lpos + a_hi, bp, bcolr, bp)
+					continue
+				if k == Blocks.K_FENCE:
+					# A centre post with two rails on each side. The shape *is* the fence
+					# now: the old version was a full cube wearing the fence silhouette, so
+					# a run of fences drew as a jumble of intersecting panels.
+					var flit := col_light
+					if emit_tab[id] > 0:
+						flit = 1.0
+					var fr := _tile_rect(Blocks.T_PLANKS)
+					var fc := Color(flit, flit, flit)
+					bufs[3].box(lpos + Vector3(0.4375, 0, 0.4375),
+						lpos + Vector3(0.5625, 1, 0.5625), fr, fc, fr)
+					for ri in [0, 1, 4, 5]:
+						var rdir: Vector3i = dirs[ri]
+						var rnid := _nb_get(p, lx + rdir.x, ly, lz + rdir.z)
+						# a rail only reaches where there is something to join: another
+						# fence, a gate, or a solid. Reaching into open air is what made a
+						# lone post look like a plus sign.
+						if occ_tab[rnid] != 1 and rnid != id and rnid != Blocks.FENCE_GATE \
+								and rnid != Blocks.FENCE_GATE_OPEN:
+							continue
+						for ry in [0.3125, 0.6875]:
+							var rlo := lpos + Vector3(0.4375, ry, 0.4375)
+							var rhi := lpos + Vector3(0.5625, ry + 0.125, 0.5625)
+							if rdir.x > 0:
+								rhi.x = lpos.x + 1.0
+							elif rdir.x < 0:
+								rlo.x = lpos.x
+							elif rdir.z > 0:
+								rhi.z = lpos.z + 1.0
+							else:
+								rlo.z = lpos.z
+							bufs[3].box(rlo, rhi, fr, fc, fr)
+					continue
+				if k == Blocks.K_GATE:
+					# A gate is a thin panel lying across the fence line, so you walk through
+					# it along the axis it faces: the same idea as a door leaf, centred in
+					# the cell rather than pushed to one edge.
+					var glit := col_light
+					if emit_tab[id] > 0:
+						glit = 1.0
+					var gfd: Vector3i = facings.get(Vector3i(lx, ly, lz), Vector3i(0, 0, 1))
+					var gaxis := 1
+					if gfd.x != 0:
+						gaxis = 0
+					bufs[3].panel(Vector3(lx, ly, lz),
+						_tile_rect(_tile_of(tiles, lx, ly, lz, id, _t_tile_top[id])),
+						Color(glit, glit, glit), gaxis, 0.5, 0.1875)
+					continue
 				var buf: Buf = bufs[k]
-				var lpos := Vector3(lx, ly, lz)
 				for f in 6:
 					var d: Vector3i = dirs[f]
 					var nid := _nb_get(p, lx + d.x, ly + d.y, lz + d.z)
@@ -1341,7 +1959,7 @@ func _mesh_job(p: Dictionary) -> void:
 
 	_mutex.lock()
 	_results.append({"c": p["c"], "sec": sec, "solid": bufs[0], "extra": bufs[1],
-		"trans": bufs[2], "cross": bufs[3], "flat": bufs[4],
+		"trans": bufs[2], "cross": bufs[3], "flat": bufs[4], "lava": bufs[5],
 		"srev": int(p.get("srev", 0))})
 	_mutex.unlock()
 
@@ -1351,6 +1969,14 @@ func _mesh_job(p: Dictionary) -> void:
 ## straight out of a held reference instead.
 func _tile_rect(t: int) -> Rect2:
 	return _t_tile_uv[clampi(t, 0, _t_tile_uv.size() - 1)]
+
+
+## The top or bottom half of a tile's rect. V grows downward, so the bottom half of a
+## block (y 0..0.5) samples V 0.5..1. Used by the slab and stair side faces so a half
+## block shows half the texture rather than a squashed whole.
+func _half_rect(r: Rect2, bottom: bool) -> Rect2:
+	return Rect2(r.position + Vector2(0.0, r.size.y * 0.5 if bottom else 0.0),
+		Vector2(r.size.x, r.size.y * 0.5))
 
 
 ## The tile a block face should be drawn with, honouring the lit/on override. The
@@ -1442,6 +2068,7 @@ func _attach_mesh(item: Dictionary) -> void:
 	var crossb: Buf = item["cross"]
 	var trans: Buf = item["trans"]
 	var flatb: Buf = item.get("flat", null)
+	var lavab: Buf = item.get("lava", null)
 
 	# Reuse this section's existing nodes. Building and breaking blocks remeshes a
 	# section constantly, and freeing + re-adding a MeshInstance3D every time is pure
@@ -1487,6 +2114,19 @@ func _attach_mesh(item: Dictionary) -> void:
 			mt.mesh = null
 			mt.visible = false
 
+	var ml := _mesh_node(ch, sec, c, "lava", lavab != null and not lavab.empty())
+	if ml != null:
+		if lavab != null and not lavab.empty():
+			var mesh3 := ArrayMesh.new()
+			mesh3.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _arrays(lavab))
+			mesh3.surface_set_material(0, Blocks.mat_lava)
+			ml.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			ml.mesh = mesh3
+			ml.visible = true
+		else:
+			ml.mesh = null
+			ml.visible = false
+
 	# Only call this section finished if nothing has changed since the snapshot was
 	# taken. Otherwise leave it dirty so it is queued again and the edit shows up.
 	if int(ch["srev"].get(sec, 0)) == int(item.get("srev", -1)):
@@ -1505,7 +2145,7 @@ func _mesh_node(ch: Dictionary, sec: int, c: Vector2i, kind: String, want: bool)
 	if pair == null:
 		if not want:
 			return null
-		pair = {"solid": null, "trans": null}
+		pair = {"solid": null, "trans": null, "lava": null}
 		nodes[sec] = pair
 	if pair[kind] == null:
 		var mi := MeshInstance3D.new()
@@ -1662,9 +2302,11 @@ func _update_lights(player_pos: Vector3) -> void:
 			l.visible = false
 		return
 	var near: Array = []
+	# 40 blocks, not 24: a torch just outside the old radius lit nothing at all, so
+	# walking toward a lit area it would pop in and out rather than brighten
 	for pos in sources:
 		var d := Vector3(pos).distance_squared_to(player_pos)
-		if d < 576.0:
+		if d < 1600.0:
 			near.append([d, pos])
 	near.sort_custom(func(a, b): return a[0] < b[0])
 	for i in _lights.size():
@@ -1673,8 +2315,10 @@ func _update_lights(player_pos: Vector3) -> void:
 			_lights[i].position = Vector3(float(p.x) + 0.5, float(p.y) + 0.6, float(p.z) + 0.5)
 			var id: int = get_block(p.x, p.y, p.z)
 			var bright: bool = Blocks.emission[id] >= 15 or bool(circuit_lit.get(p, false))
-			_lights[i].omni_range = 12.0 if bright else 9.5
-			_lights[i].light_energy = 4.6 if bright else 3.4
+			# a torch reaches about thirteen blocks in Minecraft, and the falloff is
+			# gentle enough that the floor right under it is clearly lit
+			_lights[i].omni_range = 15.0 if bright else 13.0
+			_lights[i].light_energy = 4.4 if bright else 3.6
 			_lights[i].visible = true
 		else:
 			_lights[i].visible = false
@@ -1788,3 +2432,75 @@ func load_facing(buf: PackedByteArray) -> void:
 		var pos := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
 		facing_override[pos] = Vector3i(buf.decode_s8(off + 12), buf.decode_s8(off + 13),
 			buf.decode_s8(off + 14))
+
+
+## The words on each sign, in their own file the way facings are: a sign's text is not
+## derivable from its block id. 77 bytes an entry: pos (12) + a one-byte length + 64 bytes
+## of text. The text is clipped to 16 characters first, so a multi-byte line is never cut
+## in the middle of a character.
+func serialize_signs() -> PackedByteArray:
+	var buf := PackedByteArray()
+	var n := sign_text.size()
+	buf.resize(4 + n * 77)
+	buf.encode_s32(0, n)
+	var i := 0
+	for pos in sign_text.keys():
+		var off := 4 + i * 77
+		buf.encode_s32(off, pos.x)
+		buf.encode_s32(off + 4, pos.y)
+		buf.encode_s32(off + 8, pos.z)
+		var b := str(sign_text[pos]).substr(0, 16).to_utf8_buffer()
+		var ln := mini(b.size(), 64)
+		buf.encode_u8(off + 12, ln)
+		for k in ln:
+			buf.encode_u8(off + 13 + k, b[k])
+		i += 1
+	return buf
+
+
+func load_signs(buf: PackedByteArray) -> void:
+	if buf.size() < 4:
+		return
+	var n := buf.decode_s32(0)
+	for i in n:
+		var off := 4 + i * 77
+		if off + 77 > buf.size():
+			break
+		var pos := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
+		var ln := buf.decode_u8(off + 12)
+		var raw := PackedByteArray()
+		for k in ln:
+			raw.append(buf.decode_u8(off + 13 + k))
+		sign_text[pos] = raw.get_string_from_utf8()
+
+
+## A flowing fluid cell and a source hold the same block id, so the levels cannot be
+## recovered from the blocks and get their own file, the way facings do. 13 bytes each.
+func serialize_fluid() -> PackedByteArray:
+	var buf := PackedByteArray()
+	var n := fluid.size()
+	buf.resize(4 + n * 13)
+	buf.encode_s32(0, n)
+	var i := 0
+	for pos in fluid.keys():
+		var off := 4 + i * 13
+		buf.encode_s32(off, pos.x)
+		buf.encode_s32(off + 4, pos.y)
+		buf.encode_s32(off + 8, pos.z)
+		buf.encode_u8(off + 12, int(fluid[pos]))
+		i += 1
+	return buf
+
+
+func load_fluid(buf: PackedByteArray) -> void:
+	if buf.size() < 4:
+		return
+	var n := buf.decode_s32(0)
+	for i in n:
+		var off := 4 + i * 13
+		if off + 13 > buf.size():
+			break
+		var pos := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
+		fluid[pos] = buf.decode_u8(off + 12)
+		# queued so the sim re-settles a body of water that was flowing when it was saved
+		_fluid_queue[pos] = true

@@ -23,6 +23,7 @@ Settings="*res://scripts/settings.gd"
 Sfx="*res://scripts/sfx.gd"
 Commands="*res://scripts/commands.gd"
 Gear="*res://scripts/gear.gd"
+Net="*res://scripts/net.gd"
 
 [accessibility]
 

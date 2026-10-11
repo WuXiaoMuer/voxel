@@ -51,6 +51,29 @@ const B_FOREST := 3
 const B_DESERT := 4
 const B_SNOWY := 5
 const B_MOUNTAIN := 6
+## A second kind of forest rather than a second kind of tree: what you find underfoot
+## tells you which one you are in, so a birch wood is birch, not "forest, again".
+const B_BIRCH_FOREST := 7
+
+## Tree kinds, as carried in `tree_at`'s "kind".
+const TREE_OAK := 0
+const TREE_CACTUS := 1
+const TREE_BIRCH := 2
+
+## Villages sit on a coarse grid, one candidate per cell. A cell either holds a village
+## or it does not, and everything about that village -- where it is, how high its terrace
+## sits, which way each house faces -- is a pure function of the cell and the seed. That
+## is what lets every chunk that touches a village stamp the same blocks independently and
+## in any thread, with `_put` discarding whatever falls outside the chunk.
+const VILLAGE_CELL := 112
+## How far a village's terrace and its outermost walls reach from the centre.
+const VILLAGE_RADIUS := 26
+## How many layers of ground above the terrace are cleared inside that disc. Any hill
+## taller than this is left standing, which is the price of not sampling every column of
+## the disc just to size the chunk's buffer.
+const VILLAGE_CLEAR := 22
+## Chance, out of 1000 cells, that a cell holds a village.
+const VILLAGE_CHANCE := 180
 
 var seed_value := 0
 
@@ -61,6 +84,9 @@ var _n_temp := FastNoiseLite.new()
 var _n_humid := FastNoiseLite.new()
 var _n_cave := FastNoiseLite.new()
 var _n_cave2 := FastNoiseLite.new()
+## Two jobs: which kind of forest grows here, and how thick it is. A single low-frequency
+## field means a wood has groves and clearings instead of an even sprinkle of trunks.
+var _n_forest := FastNoiseLite.new()
 
 
 func _init(s: int) -> void:
@@ -95,6 +121,12 @@ func _init(s: int) -> void:
 	_n_humid.frequency = 0.0042
 	_n_humid.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_n_humid.fractal_octaves = 2
+
+	_n_forest.seed = s + 7
+	_n_forest.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_forest.frequency = 0.010
+	_n_forest.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_n_forest.fractal_octaves = 2
 
 	_n_cave.seed = s + 5
 	_n_cave.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
@@ -143,6 +175,12 @@ func humidity_at(wx: int, wz: int) -> float:
 	return _n_humid.get_noise_2d(float(wx), float(wz))
 
 
+## Which wood grows here, and how thick. Positive is birch, and the further from zero the
+## better the growing.
+func forest_at(wx: int, wz: int) -> float:
+	return _n_forest.get_noise_2d(float(wx), float(wz))
+
+
 func biome_at(wx: int, wz: int) -> int:
 	return biome_from_height(wx, wz, height_at(wx, wz))
 
@@ -165,6 +203,10 @@ func biome_from_height(wx: int, wz: int, h: int) -> int:
 	if t < -0.30:
 		return B_SNOWY
 	if hum > 0.10:
+		# The forest field decides which wood, so the boundary between an oak wood and a
+		# birch wood is a winding edge rather than a straight line across the map.
+		if forest_at(wx, wz) > 0.05:
+			return B_BIRCH_FOREST
 		return B_FOREST
 	return B_PLAINS
 
@@ -193,39 +235,56 @@ func _column_blocks(bio: int, h: int) -> Array:
 
 
 # ================================================================ trees & plants
-## Returns {} or {"trunk": int, "y": int, "kind": int}  kind 0 = oak, 1 = cactus
+## Returns {} or {"trunk": int, "y": int, "kind": int}.
+##
+## Density is the whole game here. A canopy reaches two blocks out, so one trunk already
+## shades twenty-five columns; at the old 9%-of-columns rate the canopies of a forest
+## closed into a single green roof with no sky in it, which is what "too many trees"
+## looked like. These rates leave real gaps to walk through, and `forest_at` then makes
+## them uneven -- thick groves and open clearings in the same wood, rather than an even
+## sprinkle over the whole map.
 func tree_at(wx: int, wz: int, h: int, bio: int) -> Dictionary:
 	if h <= SEA:
 		return {}
 	var r := hash3(wx, 91, wz) % 10000
+	var f := forest_at(wx, wz) if (bio == B_FOREST or bio == B_BIRCH_FOREST) else 0.0
 	match bio:
 		B_FOREST:
-			if r < 900:
-				return {"trunk": 4 + hash3(wx, 7, wz) % 3, "y": h, "kind": 0}
+			# a grove runs several times the density of the open parts of the wood
+			if r < 120 + int(maxf(0.0, -f) * 700.0):
+				return {"trunk": 4 + hash3(wx, 7, wz) % 3, "y": h, "kind": TREE_OAK}
+		B_BIRCH_FOREST:
+			# a birch wood stays open even at its thickest: it is the sparse, walkable
+			# contrast to the oak wood's closed groves, not just oak in another colour
+			if r < 80 + int(maxf(0.0, f) * 260.0):
+				return {"trunk": 4 + hash3(wx, 7, wz) % 3, "y": h, "kind": TREE_BIRCH}
 		B_PLAINS:
-			if r < 90:
-				return {"trunk": 4 + hash3(wx, 7, wz) % 2, "y": h, "kind": 0}
+			if r < 25:
+				return {"trunk": 4 + hash3(wx, 7, wz) % 2, "y": h, "kind": TREE_OAK}
 		B_SNOWY:
-			if r < 260:
-				return {"trunk": 5 + hash3(wx, 7, wz) % 3, "y": h, "kind": 0}
+			if r < 80:
+				return {"trunk": 5 + hash3(wx, 7, wz) % 3, "y": h, "kind": TREE_OAK}
 		B_MOUNTAIN:
-			if r < 120 and h < 62:
-				return {"trunk": 4 + hash3(wx, 7, wz) % 2, "y": h, "kind": 0}
+			if r < 40 and h < 62:
+				return {"trunk": 4 + hash3(wx, 7, wz) % 2, "y": h, "kind": TREE_OAK}
 		B_DESERT:
-			if r < 130:
-				return {"trunk": 2 + hash3(wx, 7, wz) % 2, "y": h, "kind": 1}
+			if r < 70:
+				return {"trunk": 2 + hash3(wx, 7, wz) % 2, "y": h, "kind": TREE_CACTUS}
 	return {}
 
 
 func plant_at(wx: int, wz: int, bio: int) -> int:
-	if bio != B_PLAINS and bio != B_FOREST:
+	if bio != B_PLAINS and bio != B_FOREST and bio != B_BIRCH_FOREST:
 		return Blocks.AIR
+	# a birch wood is a wood, so it is grassed over the same way an oak one is, only a
+	# little thinner underfoot
 	var r := hash3(wx, 311, wz) % 1000
-	if r < 190:
+	var grass_cut := 150 if bio == B_BIRCH_FOREST else 190
+	if r < grass_cut:
 		return Blocks.TALL_GRASS
-	if r < 215:
+	if r < grass_cut + 25:
 		return Blocks.FLOWER_RED
-	if r < 235:
+	if r < grass_cut + 45:
 		return Blocks.FLOWER_YELLOW
 	return Blocks.AIR
 
@@ -359,6 +418,12 @@ func fill_chunk(cx: int, cz: int) -> Dictionary:
 	bcache.resize(EW * EW)
 	var ox := cx * CHUNK
 	var oz := cz * CHUNK
+	# Which villages reach this chunk, and how high their roofs stand, so the volume is
+	# tall enough for a village that sits higher than anything inside the chunk itself.
+	var villages := villages_for_chunk(cx, cz)
+	var vtop := MIN_Y
+	for v in villages:
+		vtop = maxi(vtop, int(v["plat"]) + VILLAGE_CLEAR)
 	var tallest := MIN_Y
 	for ex in EW:
 		for ez in EW:
@@ -372,7 +437,7 @@ func fill_chunk(cx: int, cz: int) -> Dictionary:
 	# Tall enough for the tallest canopy plus its crown cross, and for the sea: an
 	# all-ocean chunk has a low `tallest` but still carries water up to SEA + 1.
 	const CANOPY := 14
-	var top := mini(MAX_Y - 1, maxi(tallest + CANOPY, SEA + 1))
+	var top := mini(MAX_Y - 1, maxi(maxi(tallest + CANOPY, SEA + 1), vtop))
 	var sec_lo := sec_of(MIN_Y)
 	var sec_hi := sec_of(top)
 	var volume := Volume.new(sec_lo * SEC, (sec_hi - sec_lo + 1) * SEC)
@@ -395,10 +460,30 @@ func fill_chunk(cx: int, cz: int) -> Dictionary:
 
 	_place_ore_veins(cx, cz, volume, hcache, EW, M)
 	_carve_caves(cx, cz, volume, hcache, EW, M)
+	_fill_lava(volume, hcache, EW, M)
 	_fill_water(volume, hcache, EW, M)
 	_place_trees(cx, cz, volume, hcache, bcache, EW, M)
 	_place_plants(cx, cz, volume, hcache, bcache, EW, M)
+	# last, so the terrace overwrites any tree or plant that grew where the village stands
+	_place_village(cx, cz, volume, villages)
 	return volume.out()
+
+
+## The lava sea at the bottom of the world. Everything the caves opened below the lava
+## line becomes lava, which is where a player goes to fill a bucket. Filled *after* the
+## carving, so it settles into the caves rather than being cut through by them, and
+## before the water, so a flooded cave is still water.
+const LAVA_SEA := -50
+
+
+func _fill_lava(volume: Volume, hcache: PackedInt32Array, EW: int, M: int) -> void:
+	for lx in CHUNK:
+		for lz in CHUNK:
+			var h: int = hcache[(lx + M) + (lz + M) * EW]
+			var top := mini(LAVA_SEA, h)
+			for y in range(MIN_Y + 1, top):
+				if volume.at(lx, y, lz) == Blocks.AIR:
+					volume.put(lx, y, lz, Blocks.LAVA)
 
 
 func _fill_water(volume: Volume, hcache: PackedInt32Array, EW: int, M: int) -> void:
@@ -548,13 +633,33 @@ func _place_trees(cx: int, cz: int, volume: Volume, hcache: PackedInt32Array,
 			var kind: int = t["kind"]
 			var th: int = t["trunk"]
 			var by: int = t["y"]
-			if kind == 1:
+			if kind == TREE_CACTUS:
 				for i in th:
 					_put(volume, lx, by + 1 + i, lz, Blocks.CACTUS, false)
 				continue
+			var log_id := Blocks.BIRCH_LOG if kind == TREE_BIRCH else Blocks.LOG
+			var leaf_id := Blocks.BIRCH_LEAVES if kind == TREE_BIRCH else Blocks.LEAVES
 			for i in th:
-				_put(volume, lx, by + 1 + i, lz, Blocks.LOG, false)
+				_put(volume, lx, by + 1 + i, lz, log_id, false)
 			var topy := by + th
+			if kind == TREE_BIRCH:
+				# a birch is a slimmer tree than an oak: a tall bare trunk with a smaller
+				# crown only at the very top, which is what makes a birch wood read as
+				# airy next to the low, broad oaks
+				for dy in 3:
+					var yy := topy - 1 + dy
+					var rad := 1 if dy == 0 else (2 if dy == 1 else 1)
+					for dx in range(-rad, rad + 1):
+						for dz in range(-rad, rad + 1):
+							if absi(dx) == rad and absi(dz) == rad and dy != 1:
+								continue
+							_put(volume, lx + dx, yy, lz + dz, leaf_id, true)
+				for d in 4:
+					var dx3: int = [-1, 1, 0, 0][d]
+					var dz3: int = [0, 0, -1, 1][d]
+					_put(volume, lx + dx3, topy + 2, lz + dz3, leaf_id, true)
+				_put(volume, lx, topy + 2, lz, leaf_id, true)
+				continue
 			for dy in 4:
 				var yy := topy - 2 + dy
 				var rad := 2 if dy <= 1 else 1
@@ -563,12 +668,12 @@ func _place_trees(cx: int, cz: int, volume: Volume, hcache: PackedInt32Array,
 						if absi(dx) == rad and absi(dz) == rad:
 							if dy <= 1 and hash3(wx + dx, yy, wz + dz) % 100 < 55:
 								continue
-						_put(volume, lx + dx, yy, lz + dz, Blocks.LEAVES, true)
+						_put(volume, lx + dx, yy, lz + dz, leaf_id, true)
 			for d in 4:
 				var dx2: int = [-1, 1, 0, 0][d]
 				var dz2: int = [0, 0, -1, 1][d]
-				_put(volume, lx + dx2, topy + 2, lz + dz2, Blocks.LEAVES, true)
-			_put(volume, lx, topy + 2, lz, Blocks.LEAVES, true)
+				_put(volume, lx + dx2, topy + 2, lz + dz2, leaf_id, true)
+			_put(volume, lx, topy + 2, lz, leaf_id, true)
 
 
 func _place_plants(cx: int, cz: int, volume: Volume, hcache: PackedInt32Array,
@@ -597,6 +702,203 @@ func _put(volume: Volume, lx: int, y: int, lz: int, id: int, only_air: bool) -> 
 	if only_air and volume.at(lx, y, lz) != Blocks.AIR:
 		return
 	volume.put(lx, y, lz, id)
+
+
+# ================================================================ villages
+## A hash that folds in the world seed, so a village moves when the seed does. `hash3`
+## deliberately ignores the seed (tree positions are the same on every world); villages
+## should not be, or every world would hide its villages in the same places.
+func _vhash(a: int, b: int) -> int:
+	return hash3(a + seed_value * 131, 9001, b - seed_value * 37)
+
+
+## The village in grid cell (gx, gz), or {} if that cell holds none. Deterministic in
+## (gx, gz, seed): any chunk, on any thread, gets the same answer, which is what makes
+## the per-chunk stamping safe.
+func village_at(gx: int, gz: int) -> Dictionary:
+	if _vhash(gx, gz) % 1000 >= VILLAGE_CHANCE:
+		return {}
+	var pad := (VILLAGE_CELL - VILLAGE_RADIUS * 2) / 2
+	var ox := gx * VILLAGE_CELL + pad + _vhash(gx * 3 + 1, gz) % (VILLAGE_CELL - pad * 2)
+	var oz := gz * VILLAGE_CELL + pad + _vhash(gx, gz * 5 + 2) % (VILLAGE_CELL - pad * 2)
+	var h := height_at(ox, oz)
+	var bio := biome_from_height(ox, oz, h)
+	# no villages in the sea or on a cliff: a terrace needs a reasonably flat, dry start
+	if h <= SEA + 2 or h > 56 or bio == B_OCEAN or bio == B_MOUNTAIN:
+		return {}
+	return {"gx": gx, "gz": gz, "ox": ox, "oz": oz, "plat": h, "bio": bio}
+
+
+## Every village whose terrace can reach the chunk at (cx, cz). Called once per chunk,
+## before the volume is sized, so its top can be raised to fit a village that stands on
+## higher ground than anything inside the chunk itself.
+func villages_for_chunk(cx: int, cz: int) -> Array:
+	var out: Array = []
+	var x0 := cx * CHUNK - VILLAGE_RADIUS
+	var x1 := cx * CHUNK + CHUNK + VILLAGE_RADIUS
+	var z0 := cz * CHUNK - VILLAGE_RADIUS
+	var z1 := cz * CHUNK + CHUNK + VILLAGE_RADIUS
+	for gx in range(floori(float(x0) / float(VILLAGE_CELL)),
+			floori(float(x1) / float(VILLAGE_CELL)) + 1):
+		for gz in range(floori(float(z0) / float(VILLAGE_CELL)),
+				floori(float(z1) / float(VILLAGE_CELL)) + 1):
+			var v := village_at(gx, gz)
+			if not v.is_empty():
+				out.append(v)
+	return out
+
+
+## The nearest village centre within `max_dist` of (wx, wz), or null. Used by the mob
+## spawner to know where villagers belong.
+func nearest_village(wx: int, wz: int, max_dist: int):
+	var best = null
+	var best_d := max_dist * max_dist
+	for gx in range(floori(float(wx - max_dist) / float(VILLAGE_CELL)),
+			floori(float(wx + max_dist) / float(VILLAGE_CELL)) + 1):
+		for gz in range(floori(float(wz - max_dist) / float(VILLAGE_CELL)),
+				floori(float(wz + max_dist) / float(VILLAGE_CELL)) + 1):
+			var v := village_at(gx, gz)
+			if v.is_empty():
+				continue
+			var dx: int = int(v["ox"]) - wx
+			var dz: int = int(v["oz"]) - wz
+			var d := dx * dx + dz * dz
+			if d <= best_d:
+				best_d = d
+				best = v
+	return best
+
+
+## Stamps every village that touches this chunk. Runs *after* the trees and plants so the
+## terrace simply overwrites whatever grew where the village now stands.
+func _place_village(cx: int, cz: int, volume: Volume, villages: Array) -> void:
+	var chx := cx * CHUNK
+	var chz := cz * CHUNK
+	for v in villages:
+		var ox: int = v["ox"]
+		var oz: int = v["oz"]
+		var plat: int = v["plat"]
+		var r := VILLAGE_RADIUS
+		# ---- terrace: level the ground in a disc around the centre
+		for dz in range(-r, r + 1):
+			for dx in range(-r, r + 1):
+				if dx * dx + dz * dz > r * r:
+					continue
+				var lx := ox + dx - chx
+				var lz := oz + dz - chz
+				if lx < 0 or lz < 0 or lx >= CHUNK or lz >= CHUNK:
+					continue
+				var h := height_at(ox + dx, oz + dz)
+				if h <= SEA + 1:
+					continue
+				# clear everything above the terrace, then fill any hollow up to it
+				for y in range(plat + 1, mini(plat + VILLAGE_CLEAR, MAX_Y)):
+					if volume.at(lx, y, lz) != Blocks.AIR:
+						volume.put(lx, y, lz, Blocks.AIR)
+				for y in range(h + 1, plat):
+					volume.put(lx, y, lz, Blocks.DIRT)
+				volume.put(lx, plat, lz, _village_ground(v["bio"], dx, dz))
+		# ---- the well and its lamp posts at the centre
+		_place_well(volume, chx, chz, ox, oz, plat)
+		# ---- houses, doors facing the centre
+		var homes := [Vector2i(-13, -13), Vector2i(13, -13), Vector2i(-13, 13),
+			Vector2i(13, 13), Vector2i(-3, 17), Vector2i(-3, -17)]
+		for i in homes.size():
+			var off: Vector2i = homes[i]
+			var hx := ox + off.x
+			var hz := oz + off.y
+			var door := Vector2i.ZERO
+			if absi(off.x) >= absi(off.y):
+				door = Vector2i(-signi(off.x), 0)
+			else:
+				door = Vector2i(0, -signi(off.y))
+			_house(volume, chx, chz, hx, hz, plat, door)
+		# ---- a pair of fenced wheat fields either side of the plaza
+		_place_farm(volume, chx, chz, ox - 13, oz - 4, plat, 9, 9)
+		_place_farm(volume, chx, chz, ox + 5, oz - 4, plat, 9, 9)
+
+
+## The surface of a village column: a gravel path on the two axes, grass (or sand in a
+## desert) everywhere else.
+func _village_ground(bio: int, dx: int, dz: int) -> int:
+	if absi(dx) <= 1 or absi(dz) <= 1:
+		return Blocks.GRAVEL
+	if bio == B_DESERT:
+		return Blocks.SAND
+	return Blocks.GRASS
+
+
+## The central well: a stone-brick paving with a water shaft and four lamp posts, which
+## is both the village's landmark and its meeting place.
+func _place_well(volume: Volume, chx: int, chz: int, ox: int, oz: int, plat: int) -> void:
+	for dx in range(-3, 4):
+		for dz in range(-3, 4):
+			if absi(dx) == 3 or absi(dz) == 3:
+				_put(volume, ox + dx - chx, plat, oz + dz - chz, Blocks.STONE_BRICK, false)
+	# the shaft, so the well has water in it rather than a stone plug
+	for dy in range(4):
+		_put(volume, ox - chx, plat - dy, oz - chz, Blocks.WATER, false)
+	for d in [Vector2i(-2, -2), Vector2i(2, -2), Vector2i(-2, 2), Vector2i(2, 2)]:
+		_put(volume, ox + d.x - chx, plat, oz + d.y - chz, Blocks.STONE_BRICK, false)
+	# a lamp post on each corner of the paving: a fence with a glowstone on top
+	for d2 in [Vector2i(-3, -3), Vector2i(3, -3), Vector2i(-3, 3), Vector2i(3, 3)]:
+		_put(volume, ox + d2.x - chx, plat + 1, oz + d2.y - chz, Blocks.FENCE, false)
+		_put(volume, ox + d2.x - chx, plat + 2, oz + d2.y - chz, Blocks.GLOWSTONE, false)
+
+
+## A 7x7 cottage: cobble floor, log corners, plank walls with a window on each side, a
+## two-high doorway on `door`, a flat slab roof, and a torch, bed, table and chest inside.
+func _house(volume: Volume, chx: int, chz: int, hx: int, hz: int, plat: int,
+		door: Vector2i) -> void:
+	var y0 := plat + 1
+	for dx in range(-3, 4):
+		for dz in range(-3, 4):
+			_put(volume, hx + dx - chx, plat, hz + dz - chz, Blocks.COBBLESTONE, false)
+			if absi(dx) != 3 and absi(dz) != 3:
+				continue
+			for dy in 3:
+				var corner := absi(dx) == 3 and absi(dz) == 3
+				var id := Blocks.LOG if corner else Blocks.PLANKS
+				# a doorway punched over the wall, and a window at head height elsewhere
+				var is_door := Vector2i(dx, dz) == door * 3
+				if is_door and dy < 2:
+					id = Blocks.AIR
+				elif not is_door and dy == 1 and (absi(dx) == 0 or absi(dz) == 0) \
+						and absi(dx) != absi(dz):
+					id = Blocks.GLASS
+				_put(volume, hx + dx - chx, y0 + dy, hz + dz - chz, id, false)
+	# the roof, overhanging one block past the walls
+	for dx in range(-4, 5):
+		for dz in range(-4, 5):
+			_put(volume, hx + dx - chx, y0 + 3, hz + dz - chz, Blocks.SLAB_WOOD, false)
+	# furniture: a torch on the floor, a bed in one corner, a table and a chest opposite
+	_put(volume, hx + 1 - chx, y0, hz - 2 - chz, Blocks.TORCH, false)
+	_put(volume, hx - 2 - chx, y0, hz - 2 - chz, Blocks.BED, false)
+	# the far half, so the village bed is two cells with a pillow at the head. The default
+	# facing points +z, which is the axis the head is laid out along here.
+	_put(volume, hx - 2 - chx, y0, hz - 1 - chz, Blocks.BED_HEAD, false)
+	_put(volume, hx + 2 - chx, y0, hz + 2 - chz, Blocks.CRAFTING_TABLE, false)
+	_put(volume, hx - 2 - chx, y0, hz + 2 - chz, Blocks.CHEST, false)
+
+
+## A fenced field: rows of farmland with a water channel down the middle and wheat at
+## mixed stages, so a village feeds itself rather than just decorating the view.
+func _place_farm(volume: Volume, chx: int, chz: int, fx: int, fz: int, plat: int,
+		w: int, d: int) -> void:
+	for dx in range(w):
+		for dz in range(d):
+			if dx == w / 2:
+				_put(volume, fx + dx - chx, plat, fz + dz - chz, Blocks.WATER, false)
+				continue
+			_put(volume, fx + dx - chx, plat, fz + dz - chz, Blocks.FARMLAND, false)
+			var stage := 1 + hash3(fx + dx, 61, fz + dz) % 3
+			_put(volume, fx + dx - chx, plat + 1, fz + dz - chz, Blocks.WHEAT_0 + stage, false)
+	for dx in range(-1, w + 1):
+		_put(volume, fx + dx - chx, plat + 1, fz - 1 - chz, Blocks.FENCE, false)
+		_put(volume, fx + dx - chx, plat + 1, fz + d - chz, Blocks.FENCE, false)
+	for dz2 in range(d):
+		_put(volume, fx - 1 - chx, plat + 1, fz + dz2 - chz, Blocks.FENCE, false)
+		_put(volume, fx + w - chx, plat + 1, fz + dz2 - chz, Blocks.FENCE, false)
 
 
 ## Carving rule: a thin shell around the zero-crossing of the noise gives winding
@@ -635,6 +937,8 @@ func biome_name(b: int) -> String:
 			return "Plains"
 		B_FOREST:
 			return "Forest"
+		B_BIRCH_FOREST:
+			return "Birch Forest"
 		B_DESERT:
 			return "Desert"
 		B_SNOWY:

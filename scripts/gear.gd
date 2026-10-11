@@ -191,3 +191,101 @@ func armor_points(armor: Array) -> int:
 ## Fraction of incoming damage the armour set absorbs (Minecraft's points / 25, capped).
 func armor_reduction(armor: Array) -> float:
 	return minf(float(armor_points(armor)), MAX_ARMOR_POINTS) / 25.0
+
+
+# ================================================================ enchantments
+## Four enchantments, each a real multiplier on a mechanic that already exists:
+## Efficiency speeds up mining, Sharpness adds melee damage, Unbreaking saves
+## durability, and Protection adds to the armour's damage reduction. The level and the
+## enchantment itself ride on the item stack, in an `ench` dictionary, the way `dur`
+## does -- a stack outlives the hotbar, so the effect travels with the tool.
+const ENCH_EFFICIENCY := "efficiency"
+const ENCH_SHARPNESS := "sharpness"
+const ENCH_UNBREAKING := "unbreaking"
+const ENCH_PROTECTION := "protection"
+
+const ENCHANT_NAMES := {
+	ENCH_EFFICIENCY: "Efficiency",
+	ENCH_SHARPNESS: "Sharpness",
+	ENCH_UNBREAKING: "Unbreaking",
+	ENCH_PROTECTION: "Protection",
+}
+
+const ENCHANT_DESC := {
+	ENCH_EFFICIENCY: "Mine faster. +45% speed per level.",
+	ENCH_SHARPNESS: "Hit harder. +1.25 damage per level.",
+	ENCH_UNBREAKING: "The tool wears out more slowly.",
+	ENCH_PROTECTION: "Take less damage. +4% per level.",
+}
+
+
+## The enchantments that may be put on a tool or a piece of armour, in offer order.
+func enchantable(id: int) -> Array:
+	var out: Array = []
+	if TOOLS.has(id):
+		var k := int(TOOLS[id]["kind"])
+		if k == PICK or k == AXE or k == SHOVEL or k == HOE:
+			out.append(ENCH_EFFICIENCY)
+		if k == SWORD:
+			out.append(ENCH_SHARPNESS)
+		out.append(ENCH_UNBREAKING)
+	elif ARMOR.has(id):
+		out.append(ENCH_PROTECTION)
+		out.append(ENCH_UNBREAKING)
+	return out
+
+
+func enchant_name(e: String) -> String:
+	return str(ENCHANT_NAMES.get(e, e))
+
+
+func enchant_desc(e: String) -> String:
+	return str(ENCHANT_DESC.get(e, ""))
+
+
+## The highest level an enchantment can reach. Kept at three for all of them, so the
+## cost curve (level + 1) is the only thing that changes.
+func enchant_max(_e: String) -> int:
+	return 3
+
+
+## The level of `e` stored on a stack, 0 when the item is unenchanted.
+func ench_of(stack: Dictionary, e: String) -> int:
+	var m = stack.get("ench", null)
+	if m is Dictionary:
+		return int(m.get(e, 0))
+	return 0
+
+
+func set_ench(stack: Dictionary, e: String, lvl: int) -> void:
+	var m = stack.get("ench", null)
+	if not (m is Dictionary):
+		m = {}
+		stack["ench"] = m
+	m[e] = lvl
+
+
+## Mining-speed multiplier from the stack's Efficiency level.
+func ench_speed_mult(stack: Dictionary) -> float:
+	return 1.0 + 0.45 * float(ench_of(stack, ENCH_EFFICIENCY))
+
+
+## Extra melee damage from the stack's Sharpness level.
+func ench_damage_bonus(stack: Dictionary) -> float:
+	return 1.25 * float(ench_of(stack, ENCH_SHARPNESS))
+
+
+## Extra damage reduction from Protection on the worn armour, on top of its points.
+func ench_protection(armor: Array) -> float:
+	var lv := 0
+	for c in armor:
+		if c is Dictionary:
+			lv += ench_of(c, ENCH_PROTECTION)
+	return minf(float(lv) * 0.04, 0.44)
+
+
+## True when Unbreaking saves this stack from taking a point of wear. Level N skips
+## wear with probability N/(N+1), exactly Minecraft's rule.
+func unbreaking_skips(stack: Dictionary) -> bool:
+	var lv := ench_of(stack, ENCH_UNBREAKING)
+	return lv > 0 and randf() < float(lv) / float(lv + 1)

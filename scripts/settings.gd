@@ -26,6 +26,12 @@ var fog_scale := 1.0
 ## streams a large render distance in faster, at the cost of frame time.
 var chunk_budget_ms := 12
 var auto_jump := false
+## Whether the mouse is captured (clipped to the window) while playing. Captured is what
+## a first-person camera wants -- relative motion keeps coming no matter where the pointer
+## goes -- but it also means Windows pins the cursor inside the game, so turning this off
+## leaves the pointer free to reach another monitor at the cost of look stopping at the
+## window edge. Menus never capture either way; this is play only.
+var lock_mouse := true
 var player_skin := 0
 var player_skin_path := ""      # a real Minecraft skin PNG, when one is chosen
 
@@ -134,6 +140,7 @@ func load_settings() -> void:
 	fog_scale = clampf(float(cf.get_value("video", "fog_scale", fog_scale)), 0.3, 4.0)
 	chunk_budget_ms = clampi(int(cf.get_value("video", "chunk_budget_ms", chunk_budget_ms)), 2, 40)
 	auto_jump = bool(cf.get_value("game", "auto_jump", auto_jump))
+	lock_mouse = bool(cf.get_value("input", "lock_mouse", lock_mouse))
 	player_skin = int(cf.get_value("game", "player_skin", player_skin))
 	player_skin_path = str(cf.get_value("game", "player_skin_path", player_skin_path))
 	render_distance = clampi(render_distance, MIN_RD, MAX_RD)
@@ -159,6 +166,7 @@ func save_settings() -> void:
 	cf.set_value("audio", "volume", volume)
 	cf.set_value("audio", "music", music_volume)
 	cf.set_value("game", "auto_jump", auto_jump)
+	cf.set_value("input", "lock_mouse", lock_mouse)
 	cf.set_value("game", "player_skin", player_skin)
 	cf.set_value("game", "player_skin_path", player_skin_path)
 	cf.save(PATH)

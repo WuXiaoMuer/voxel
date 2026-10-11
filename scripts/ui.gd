@@ -3,6 +3,8 @@ extends CanvasLayer
 ## death and the loading overlay.
 
 signal new_world_requested(world_name: String, seed_value: int, creative: bool, distance: int, cheats: bool)
+signal host_requested(port: int, player_name: String)
+signal join_requested(ip: String, port: int, player_name: String)
 signal load_world_requested(dir_name: String)
 signal delete_world_requested(dir_name: String)
 signal resume_requested()
@@ -45,6 +47,7 @@ var _quality_btn: Button
 var _fs_btn: Button
 var _vsync_btn: Button
 var _bob_btn: Button
+var _lock_btn: Button
 var _fps_btn: Button
 var _skin_btn: Button
 var _skin_file_btn: Button
@@ -54,6 +57,10 @@ var _settings_return := "title"
 var _root: Control
 var _lang_btn: Button
 var _pack_btn: Button
+var _mp_name_field: LineEdit
+var _mp_ip_field: LineEdit
+var _mp_port_field: LineEdit
+var _mp_status: Label
 
 
 func _ready() -> void:
@@ -85,6 +92,7 @@ func _rebuild() -> void:
 	add_child(_root)
 
 	screens["title"] = _build_title()
+	screens["lobby"] = _build_lobby()
 	screens["create"] = _build_create()
 	screens["worlds"] = _build_worlds()
 	screens["settings"] = _build_settings()
@@ -212,6 +220,10 @@ func _build_title() -> Control:
 	b_load.pressed.connect(_on_load_pressed)
 	col.add_child(b_load)
 
+	var b_mp := _button("MULTIPLAYER")
+	b_mp.pressed.connect(_on_multiplayer_pressed)
+	col.add_child(b_mp)
+
 	var b_set := _button("SETTINGS")
 	b_set.pressed.connect(_on_title_settings)
 	col.add_child(b_set)
@@ -235,6 +247,96 @@ func _on_new_pressed() -> void:
 
 func _on_load_pressed() -> void:
 	open_screen("worlds")
+
+
+func _on_multiplayer_pressed() -> void:
+	open_screen("lobby")
+
+
+# ================================================================ multiplayer lobby
+## Host Game / Join Game. Small on purpose: the host's seed, mode and settings travel in
+## the handshake, and terrain is regenerated from that seed on the client, so the lobby has
+## nothing to negotiate beyond an address.
+func _build_lobby() -> Control:
+	var c := Control.new()
+	c.add_child(_bg(1.0))
+	c.add_child(_dark(0.45))
+
+	var panel := Panel.new()
+	panel.position = Vector2(430, 110)
+	panel.size = Vector2(420, 500)
+	panel.add_theme_stylebox_override("panel", Art._sb_texture(Art.tex_panel, 6, 16))
+	c.add_child(panel)
+
+	var v := VBoxContainer.new()
+	v.position = Vector2(24, 20)
+	v.custom_minimum_size = Vector2(372, 0)
+	v.add_theme_constant_override("separation", 10)
+	panel.add_child(v)
+
+	v.add_child(_title_label("MULTIPLAYER"))
+
+	v.add_child(_plain_label("Your name"))
+	_mp_name_field = LineEdit.new()
+	_mp_name_field.text = "Player"
+	_mp_name_field.custom_minimum_size = Vector2(0, 42)
+	v.add_child(_mp_name_field)
+
+	v.add_child(_plain_label("Port"))
+	_mp_port_field = LineEdit.new()
+	_mp_port_field.text = str(Net.DEFAULT_PORT)
+	_mp_port_field.custom_minimum_size = Vector2(0, 42)
+	v.add_child(_mp_port_field)
+
+	var b_host := _button("HOST GAME")
+	b_host.pressed.connect(_on_mp_host)
+	v.add_child(b_host)
+
+	v.add_child(_plain_label("Address to join"))
+	_mp_ip_field = LineEdit.new()
+	_mp_ip_field.text = "127.0.0.1"
+	_mp_ip_field.custom_minimum_size = Vector2(0, 42)
+	v.add_child(_mp_ip_field)
+
+	var b_join := _button("JOIN GAME")
+	b_join.pressed.connect(_on_mp_join)
+	v.add_child(b_join)
+
+	_mp_status = Label.new()
+	_mp_status.add_theme_font_size_override("font_size", PFont.S)
+	_mp_status.add_theme_color_override("font_color", Color(0.92, 0.80, 0.55))
+	_mp_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_mp_status.custom_minimum_size = Vector2(372, 40)
+	v.add_child(_mp_status)
+
+	var b_back := _button("BACK")
+	b_back.pressed.connect(func() -> void: open_screen("title"))
+	v.add_child(b_back)
+	return c
+
+
+func _mp_name() -> String:
+	var n := _mp_name_field.text.strip_edges()
+	return "Player" if n == "" else n
+
+
+func _mp_port() -> int:
+	var p := int(_mp_port_field.text.strip_edges())
+	return Net.DEFAULT_PORT if p <= 0 or p > 65535 else p
+
+
+func _on_mp_host() -> void:
+	host_requested.emit(_mp_port(), _mp_name())
+
+
+func _on_mp_join() -> void:
+	join_requested.emit(_mp_ip_field.text.strip_edges(), _mp_port(), _mp_name())
+
+
+## A short line under the buttons: "connecting", "could not reach", and so on.
+func mp_status(text: String) -> void:
+	if _mp_status != null:
+		_mp_status.text = I18n.t(text)
 
 
 func _on_title_settings() -> void:
@@ -571,6 +673,12 @@ func _build_settings() -> Control:
 	_bob_btn.pressed.connect(_on_bob_pressed)
 	v.add_child(_bob_btn)
 
+	# off means the cursor is not clipped to the window while you play, so it can reach
+	# another monitor -- at the cost of the camera stopping when the pointer hits the edge
+	_lock_btn = _toggle("Lock the mouse while playing", Settings.lock_mouse)
+	_lock_btn.pressed.connect(_on_lock_mouse_pressed)
+	v.add_child(_lock_btn)
+
 	v.add_child(_section("PLAYER"))
 	_skin_btn = _button(I18n.tf("Skin: %s   (press F5 for third person)", [_skin_name()]), 556)
 	_skin_btn.pressed.connect(_on_skin_pressed)
@@ -805,6 +913,13 @@ func _on_vsync_pressed() -> void:
 func _on_bob_pressed() -> void:
 	Settings.view_bob = _bob_btn.button_pressed
 	_bob_btn.text = "%s: %s" % [I18n.t("View bobbing"), I18n.t("ON" if Settings.view_bob else "OFF")]
+	Settings.save_settings()
+
+
+func _on_lock_mouse_pressed() -> void:
+	Settings.lock_mouse = _lock_btn.button_pressed
+	_lock_btn.text = "%s: %s" % [I18n.t("Lock the mouse while playing"),
+		I18n.t("ON" if Settings.lock_mouse else "OFF")]
 	Settings.save_settings()
 
 

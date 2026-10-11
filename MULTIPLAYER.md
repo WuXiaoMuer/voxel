@@ -1,6 +1,11 @@
 # VOXELCRAFT — Multiplayer design
 
-**Status: plan only. Nothing here is implemented yet.**
+**Status: the first slice is built.** Host-and-play, the handshake and block-edit
+synchronisation all work over a real ENet socket (see §8). Terrain is **not** streamed:
+because `terrain.gd` is seed-deterministic, a client builds the same world from the host's
+seed and only the *edit diff* travels — the simplification §9 predicted. What is still
+open: remote player avatars (§6), host-authoritative mobs and drops (§6), server-side
+commands (§7b), and the chunk-streaming path of §4 for a client that cannot generate.
 
 The point of this document is to fix the *architecture* before a line of netcode is
 written, because the shape of the answer changes a lot of what `world.gd`,
@@ -220,9 +225,18 @@ they slot in as a `level` lookup plus one more refusal branch.
    prove the game is unchanged with `--selftest` / `--handtest`.~~ **Done** — see §3.
    `world.Authority` is installed by default, `set_block` is now a request, and the
    hand test proves the seam routes, applies and filters.
-2. **Peer + handshake.** Host/join, exchange seed and settings, no world yet.
-3. **Chunk streaming.** Join a world and see terrain appear, still no edits.
-4. **Block edits.** The predict / confirm / reject loop. This is the core feature.
+2. ~~**Peer + handshake.** Host/join, exchange seed and settings, no world yet.~~
+   **Done** — `net.gd` (autoload) owns the `ENetMultiplayerPeer`, the `_hello` / `_welcome`
+   handshake and the two authority classes; the title menu's **MULTIPLAYER** screen hosts
+   or joins by IP.
+3. **Chunk streaming.** Skipped in favour of the §9 simplification: the client regenerates
+   terrain from the shared seed, so there is nothing to stream. Still open for a client
+   that cannot generate (a very large render distance, or a non-shared seed).
+4. ~~**Block edits.** The predict / confirm / reject loop. This is the core feature.~~
+   **Done, minus rejection** — `Net.ClientAuthority` predicts locally and asks the host;
+   `Net.HostAuthority` applies and broadcasts; the joiner is handed the accumulated
+   `serialize_edits()` diff. With no server-side reach check yet there is nothing to
+   reject, so the rollback branch is not written.
 5. **Remote player avatars.**
 6. **Host-authoritative mobs and drops.**
 7. Polish: name tags, a player list, and the render-distance/bandwidth knobs. Chat,

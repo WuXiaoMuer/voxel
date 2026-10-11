@@ -24,6 +24,53 @@ var _auto_fog_end := 100.0
 ## this rather than to a hard-coded value, so a pack change survives a dive.
 var _base_saturation := 1.08
 
+## Weather. It changes on its own clock: long clear spells, shorter rain, and the odd
+## thunderstorm. `rain_level` is a 0..1 blend so the sky darkens and the rain fades in
+## rather than snapping, and `_flash` is the brief brightening of a lightning strike.
+enum Weather { CLEAR, RAIN, THUNDER }
+var weather := Weather.CLEAR
+var weather_timer := 60.0
+var rain_level := 0.0
+var _flash := 0.0
+const WEATHER_MIN := 35.0
+const WEATHER_MAX := 120.0
+
+
+func is_raining() -> bool:
+	return weather != Weather.CLEAR
+
+
+func is_thundering() -> bool:
+	return weather == Weather.THUNDER
+
+
+## How bright the last lightning strike still is, 0..1.
+func thunder_flash() -> float:
+	return _flash
+
+
+func set_weather(w: int, instantly: bool = false) -> void:
+	weather = w
+	weather_timer = randf_range(WEATHER_MIN, WEATHER_MAX)
+	if instantly:
+		rain_level = 0.0 if w == Weather.CLEAR else 1.0
+		_flash = 0.0
+
+
+func _advance_weather(delta: float) -> void:
+	weather_timer -= delta
+	if weather_timer <= 0.0:
+		if weather == Weather.CLEAR:
+			# a storm is rarer than ordinary rain
+			set_weather(Weather.THUNDER if randf() < 0.25 else Weather.RAIN)
+		else:
+			set_weather(Weather.CLEAR)
+	var target := 0.0 if weather == Weather.CLEAR else 1.0
+	rain_level = lerpf(rain_level, target, clampf(delta * 0.4, 0.0, 1.0))
+	if weather == Weather.THUNDER and rain_level > 0.8 and randf() < delta * 0.30:
+		_flash = 1.0
+	_flash = maxf(0.0, _flash - delta * 4.0)
+
 
 ## Depth fog fades the terrain into the horizon colour right at the render
 ## distance, so the edge of the loaded world is never visible.
@@ -44,17 +91,31 @@ func apply_fog() -> void:
 	_fog_end = _auto_fog_end * s
 	_fog_begin = minf(_auto_fog_begin * s, _fog_end * 0.9)
 
-const SKY_DAY_TOP := Color(0.29, 0.52, 0.90)
-const SKY_DAY_HORIZON := Color(0.66, 0.80, 0.94)
+const SKY_DAY_TOP := Color(0.36, 0.58, 0.95)
+const SKY_DAY_HORIZON := Color(0.70, 0.84, 0.98)
 const SKY_NIGHT_TOP := Color(0.02, 0.03, 0.09)
 const SKY_NIGHT_HORIZON := Color(0.05, 0.07, 0.16)
 const SKY_DUSK_TOP := Color(0.16, 0.20, 0.44)
 const SKY_DUSK_HORIZON := Color(0.92, 0.50, 0.28)
 const GROUND_DAY := Color(0.36, 0.33, 0.28)
 const GROUND_NIGHT := Color(0.03, 0.04, 0.06)
-const FOG_DAY := Color(0.68, 0.80, 0.94)
+const FOG_DAY := Color(0.72, 0.84, 0.97)
 const FOG_NIGHT := Color(0.04, 0.05, 0.11)
 const FOG_DUSK := Color(0.80, 0.55, 0.40)
+
+## Sky light at noon and at midnight. Minecraft's daylight is directional enough that a
+## block's top and its sides read as different shades; a near-full ambient flattens that
+## out and the terrain turns into one flat green. The midnight floor stays well clear of
+## zero so a night is *dim*, not unplayably black, and a torch still has something to be
+## brighter than.
+const AMBIENT_DAY := 0.62
+const AMBIENT_NIGHT := 0.34
+## The sun's own strength at noon. Raised alongside the lower ambient: contrast has to come
+## from somewhere, and taking it out of the ambient without putting it back in the sun
+## just makes the world dark.
+const SUN_DAY := 1.45
+## Moonlight, so a night has shape instead of being a black silhouette.
+const MOON_NIGHT := 0.30
 
 
 func _ready() -> void:
@@ -162,6 +223,7 @@ func apply_render_preset(preset: int) -> void:
 func advance(delta: float) -> void:
 	if running:
 		time_of_day = fmod(time_of_day + delta / DAY_LENGTH, 1.0)
+		_advance_weather(delta)
 	update_sky(delta)
 
 
@@ -178,6 +240,14 @@ func update_sky(delta: float) -> void:
 	var ground := GROUND_DAY.lerp(GROUND_NIGHT, night)
 	var fogc := FOG_DAY.lerp(FOG_NIGHT, night).lerp(FOG_DUSK, dusk * 0.7)
 
+	# a storm drains the colour out of the sky and flattens the light
+	var wet := rain_level
+	if wet > 0.001:
+		top = top.lerp(Color(0.13, 0.15, 0.18), wet * 0.85)
+		horizon = horizon.lerp(Color(0.30, 0.32, 0.35), wet * 0.80)
+		ground = ground.lerp(Color(0.12, 0.12, 0.13), wet * 0.60)
+		fogc = fogc.lerp(Color(0.36, 0.38, 0.41), wet * 0.85)
+
 	sky_mat.sky_top_color = top
 	sky_mat.sky_horizon_color = horizon
 	sky_mat.ground_bottom_color = ground
@@ -185,14 +255,14 @@ func update_sky(delta: float) -> void:
 
 	var sun_pos := Vector3(cos(a) * 120.0, elev * 120.0, 40.0)
 	sun.look_at_from_position(sun_pos, Vector3.ZERO, Vector3.UP)
-	sun.light_energy = lerpf(0.0, 1.15, day)
+	sun.light_energy = lerpf(0.0, SUN_DAY, day) * lerpf(1.0, 0.35, wet)
 	sun.light_color = Color(1.0, 0.97, 0.90).lerp(Color(1.0, 0.62, 0.34), dusk)
 
 	var moon_pos := Vector3(-cos(a) * 120.0, -elev * 120.0, 40.0)
 	moon.look_at_from_position(moon_pos, Vector3.ZERO, Vector3.UP)
-	moon.light_energy = lerpf(0.0, 0.16, night)
+	moon.light_energy = lerpf(0.0, MOON_NIGHT, night)
 
-	env.ambient_light_energy = lerpf(0.45, 0.90, day)
+	env.ambient_light_energy = lerpf(AMBIENT_NIGHT, AMBIENT_DAY, day) * lerpf(1.0, 0.65, wet)
 	var target_fog := fogc
 	var target_amb := env.ambient_light_energy
 	var fb := _fog_begin
@@ -205,6 +275,11 @@ func update_sky(delta: float) -> void:
 		fe = lerpf(fe, 16.0, _underwater_blend)
 		env.adjustment_saturation = lerpf(_base_saturation, _base_saturation * 0.79,
 			_underwater_blend)
+
+	if _flash > 0.001:
+		# a lightning strike washes the world white for a moment
+		target_fog = target_fog.lerp(Color(0.90, 0.92, 1.0), _flash * 0.7)
+		target_amb += _flash * 0.9
 
 	env.fog_light_color = target_fog
 	env.fog_depth_begin = fb

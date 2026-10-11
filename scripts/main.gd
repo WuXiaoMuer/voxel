@@ -15,6 +15,7 @@ var particles: Node3D
 var projectiles: Node3D
 var containers: Node
 var _grow_t := 0.0            # wheat growth clock
+var _sign_t := 0.0            # sign-label streaming clock
 var hud: CanvasLayer
 var ui: CanvasLayer
 var selection: MeshInstance3D
@@ -26,20 +27,43 @@ var world_dir := ""
 var seed_value := 12345
 
 var _inv_open := false
+## True while the enchanting table's offer panel is up.
+var _enchant_open := false
+var _enchant_offers: Array = []
+## True while a villager's trade panel is up, and what it is offering.
+var _trade_open := false
+var _trade_offers: Array = []
 var _chat_open := false
 ## True while the box was opened as the backtick terminal, where a line without a
 ## leading "/" is still a command.
 var _console_mode := false
+## When set, the chat box is being used to write on a sign rather than to chat: the
+## submitted line becomes the sign's text instead of a message.
+var _sign_edit_pos := Vector3i(0, 0, 0)
 ## Whether this world allows commands. Creative worlds default to yes; a survival
 ## world asks on the create screen. Restored from the save on load.
 var _cheats := true
 var _capture := ""
 var _capture_dir := "res://previews"
+## Set by the client's two-peer test when the host's authoritative edit comes back.
+var _net_ok := false
 var _capture_seed := 1337
 var _fps_smooth := 60.0
 var _needs_spawn_fix := false
 var _crack_mat: StandardMaterial3D
 var _crack_stage := -1
+## Where the player respawns after dying. Set to the world spawn on load, and moved to a
+## bed the player sleeps in.
+var spawn_point := Vector3.ZERO
+## The rain/snow emitter. One node, re-tuned between rain and snow when the player walks
+## into a cold biome; it follows the player so the storm is always overhead.
+var weather_fx: CPUParticles3D
+var _weather_snow := false
+var _prev_flash := 0.0
+## Experience orbs: little emissive motes that pop out, fall, then home in on the player.
+var xp_fx: Node3D
+var xp_orbs: Array = []
+var _xp_orb_mat: StandardMaterial3D
 
 
 ## Stands in for the world's authority, to prove the seam really sees every
@@ -69,6 +93,10 @@ func _ready() -> void:
 	sky = load("res://scripts/sky.gd").new()
 	sky.name = "Sky"
 	add_child(sky)
+	_build_weather_fx()
+	xp_fx = Node3D.new()
+	xp_fx.name = "XPOrbs"
+	add_child(xp_fx)
 
 	mobs = load("res://scripts/mobs.gd").new()
 	mobs.name = "Mobs"
@@ -108,6 +136,7 @@ func _ready() -> void:
 	mobs.projectiles = projectiles
 	mobs.mob_died.connect(_on_mob_died)
 	mobs.exploded.connect(_on_explode)
+	mobs.villager_used.connect(_on_villager_used)
 	player.set_mobs(mobs)
 
 	# Chest / furnace contents, and the interaction signals that open their panels.
@@ -121,6 +150,9 @@ func _ready() -> void:
 	world.container_opened.connect(_on_container_opened)
 	world.furnace_opened.connect(_on_furnace_opened)
 	world.table_opened.connect(_on_table_opened)
+	world.sign_opened.connect(_on_sign_opened)
+	world.bed_used.connect(_on_bed_used)
+	world.enchant_opened.connect(_on_enchant_opened)
 
 	hud = load("res://scripts/hud.gd").new()
 	hud.name = "HUD"
@@ -139,6 +171,18 @@ func _ready() -> void:
 	ui.respawn_requested.connect(_respawn)
 	ui.settings_applied.connect(_apply_settings)
 
+	# Multiplayer. The network module is handed the live world/player so it can answer
+	# the handshake and route edits; main only owns the lobby wiring and the world start.
+	Net.world = world
+	Net.player = player
+	ui.host_requested.connect(_on_host_requested)
+	ui.join_requested.connect(_on_join_requested)
+	Net.hosted.connect(_on_net_hosted)
+	Net.welcomed.connect(_on_net_welcomed)
+	Net.join_failed.connect(_on_net_join_failed)
+	Net.player_joined.connect(_on_net_player_joined)
+	Net.player_left.connect(_on_net_player_left)
+
 	# The command console is bound to the live nodes rather than reaching for them
 	# itself, which is what will let the same registry run server-side later.
 	Commands.bind(player, world, sky, hud)
@@ -146,6 +190,8 @@ func _ready() -> void:
 	_set_cheats(true)
 	hud.chat_submitted.connect(_on_chat_submitted)
 	hud.chat_canceled.connect(_close_chat)
+	hud.enchant_choice.connect(_on_enchant_choice)
+	hud.trade_choice.connect(_on_trade_choice)
 
 	_build_selection()
 	_build_crack()
@@ -286,18 +332,34 @@ func _on_block_broken(pos: Vector3i, id: int) -> void:
 	# tall grass sometimes holds seeds, the way leaves hold an apple
 	if id == Blocks.TALL_GRASS and randf() < 0.4:
 		item_entities.drop(Blocks.ITEM_SEEDS, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
+	# ores are worth experience to mine, as in Minecraft
+	var ore_xp := 0
+	match id:
+		Blocks.COAL_ORE:
+			ore_xp = 1
+		Blocks.DIAMOND_ORE, Blocks.GOLD_ORE:
+			ore_xp = 4
+		Blocks.IRON_ORE, Blocks.COPPER_ORE:
+			ore_xp = 2
+	if ore_xp > 0:
+		_spawn_xp(Vector3(float(pos.x) + 0.5, float(pos.y) + 0.5, float(pos.z) + 0.5), ore_xp)
 
 
 func _is_wheat(id: int) -> bool:
 	return id == Blocks.WHEAT_0 or id == Blocks.WHEAT_1 or id == Blocks.WHEAT_2 or id == Blocks.WHEAT_3
 
 
-## A mob died: drop its loot on the ground (creative players get nothing, as with blocks).
+## A mob died: drop its loot on the ground.
+##
+## Minecraft gates a lot on creative mode, but not this: kill a pig in creative and it
+## still drops a porkchop. Gating loot on it here meant a creative player -- which is the
+## mode a world starts in -- killed things and watched nothing happen, which reads as
+## "mob drops are broken" rather than as a rule.
 func _on_mob_died(kind: String, pos: Vector3) -> void:
 	Sfx.play("mob_die", -6.0, randf_range(0.9, 1.1))
 	particles.burst(pos + Vector3(0, 0.4, 0), Color(0.4, 0.4, 0.4), 10)
-	if player.creative:
-		return
+	# killing something is worth experience; the orbs fly to the player
+	_spawn_xp(pos, _mob_xp(kind))
 	match kind:
 		"zombie":
 			if randf() < 0.7:
@@ -316,11 +378,28 @@ func _on_mob_died(kind: String, pos: Vector3) -> void:
 			item_entities.drop(Blocks.ITEM_LEATHER, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
 			item_entities.drop(Blocks.ITEM_BEEF_RAW, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
 		"sheep":
-			item_entities.drop(Blocks.ITEM_BEEF_RAW, 1, pos + Vector3(0, 0.3, 0))
+			# wool, not beef: a sheep is a wool animal in Minecraft, and the raw mutton
+			# comes on top of it. White wool is the one this game can shear.
+			item_entities.drop(Blocks.WOOL_0, 1, pos + Vector3(0, 0.3, 0))
+			item_entities.drop(Blocks.ITEM_BEEF_RAW, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
 		"chicken":
 			item_entities.drop(Blocks.ITEM_CHICKEN_RAW, 1, pos + Vector3(0, 0.3, 0))
 			if randf() < 0.5:
 				item_entities.drop(Blocks.ITEM_FEATHER, 1, pos + Vector3(0, 0.3, 0))
+		"slime":
+			item_entities.drop(Blocks.ITEM_SLIME_BALL, 1 + randi() % 3, pos + Vector3(0, 0.3, 0))
+		"enderman":
+			item_entities.drop(Blocks.ITEM_ENDER_PEARL, 1, pos + Vector3(0, 0.3, 0))
+
+
+## Experience a species is worth when killed.
+func _mob_xp(kind: String) -> int:
+	match kind:
+		"zombie", "skeleton", "creeper", "enderman":
+			return 5
+		"spider", "slime":
+			return 2
+	return 1 + randi() % 3
 
 
 ## A creeper went off: blast a sphere of blocks away through the edit seam (which also
@@ -363,6 +442,9 @@ func _on_item_thrown(id: int, count: int) -> void:
 
 # ================================================================ modes
 func _enter_title() -> void:
+	# leaving a session always drops the socket: a stale host peer would keep the port
+	# open, and a stale client peer would keep trying to talk to a world that is gone
+	Net.stop()
 	mode = Mode.TITLE
 	if _chat_open:
 		_close_chat()
@@ -387,6 +469,7 @@ func _on_new_world(nm: String, s: int, creative: bool, distance: int, cheats: bo
 		projectiles.clear()
 	containers.reset()
 	particles.clear()
+	_clear_xp_orbs()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
 	world.ao_enabled = Settings.quality > 0
@@ -397,6 +480,90 @@ func _on_new_world(nm: String, s: int, creative: bool, distance: int, cheats: bo
 	player.reset_inventory()
 	seed_value = s
 	sky.time_of_day = 0.42
+	spawn_point = Vector3.ZERO
+	sky.set_weather(sky.Weather.CLEAR, true)
+	player.place_at(world.terrain.find_spawn() + Vector3(0, 0.2, 0))
+	_needs_spawn_fix = true
+	if creative:
+		player.fill_creative_hotbar()
+	_begin_loading()
+
+
+# ================================================================ multiplayer
+## Host Game: open the socket, then build an ordinary world on top of it. The authority is
+## swapped in afterwards, so the world is fully generated before any edit can arrive.
+func _on_host_requested(port: int, player_name: String) -> void:
+	if not Net.host(port, player_name):
+		return
+	_on_new_world("Multiplayer", randi(), true, Settings.render_distance, true)
+	world.authority = Net.HostAuthority.new()
+
+
+func _on_join_requested(ip: String, port: int, player_name: String) -> void:
+	if ip == "":
+		ui.mp_status("Enter the host's address first.")
+		return
+	ui.mp_status("Connecting to %s:%d ..." % [ip, port])
+	Net.join(ip, port, player_name)
+
+
+func _on_net_hosted() -> void:
+	ui.mp_status("Hosting. Waiting for players.")
+
+
+func _on_net_join_failed(reason: String) -> void:
+	ui.open_screen("lobby")
+	ui.mp_status(reason)
+
+
+func _on_net_player_joined(id: int) -> void:
+	if mode == Mode.PLAY:
+		var who: Dictionary = Net.players.get(id, {})
+		hud.toast(I18n.tf("%s joined.", [str(who.get("name", "A player"))]))
+
+
+func _on_net_player_left(_id: int) -> void:
+	if mode == Mode.PLAY:
+		hud.toast(I18n.t("A player left."))
+
+
+## A joining client: build the host's world from its seed, then drop the host's accumulated
+## edit diff on top. Terrain comes out of `terrain.gd` on both machines from the same seed,
+## so the only thing that has to travel is the edits -- which is exactly what arrived.
+func _on_net_welcomed(seed_s: int, creative: bool, distance: int, cheats: bool,
+		edits: PackedByteArray) -> void:
+	_seed_network_world(seed_s, creative, distance, cheats, edits)
+
+
+func _seed_network_world(s: int, creative: bool, distance: int, cheats: bool,
+		edits: PackedByteArray) -> void:
+	world_name = "Multiplayer"
+	seed_value = s
+	world_dir = ""
+	_set_cheats(cheats)
+	world.reset()
+	mobs.reset()
+	item_entities.reset()
+	if projectiles != null:
+		projectiles.clear()
+	containers.reset()
+	particles.clear()
+	_clear_xp_orbs()
+	world.setup(s, distance)
+	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
+	world.ao_enabled = Settings.quality > 0
+	sky.set_render_distance(world.render_distance)
+	player.creative = creative
+	player.flying = false
+	player.heal_all()
+	player.reset_inventory()
+	sky.time_of_day = 0.42
+	spawn_point = Vector3.ZERO
+	sky.set_weather(sky.Weather.CLEAR, true)
+	# the host's changes, replayed as chunks stream in (the same path the save loader uses),
+	# then the client authority so my own edits predict locally and ask the host
+	world.load_edits(edits)
+	world.authority = Net.ClientAuthority.new()
 	player.place_at(world.terrain.find_spawn() + Vector3(0, 0.2, 0))
 	_needs_spawn_fix = true
 	if creative:
@@ -417,6 +584,7 @@ func _on_load_world(dir_name: String) -> void:
 		projectiles.clear()
 	containers.reset()
 	particles.clear()
+	_clear_xp_orbs()
 	world_name = str(meta.get("name", dir_name))
 	seed_value = int(meta.get("seed", 12345))
 	_set_cheats(bool(meta.get("cheats", true)))
@@ -427,6 +595,13 @@ func _on_load_world(dir_name: String) -> void:
 	world.ao_enabled = Settings.quality > 0
 	sky.set_render_distance(world.render_distance)
 	sky.time_of_day = float(meta.get("time", 0.3))
+	# weather and the bed respawn point are part of the world's state too
+	sky.set_weather(int(meta.get("weather", 0)), true)
+	if meta.has("weather_timer"):
+		sky.weather_timer = float(meta.get("weather_timer"))
+	var sp = meta.get("spawn", null)
+	if sp is Array and sp.size() == 3:
+		spawn_point = Vector3(float(sp[0]), float(sp[1]), float(sp[2]))
 	var ed := FileAccess.open("%s/edits.bin" % base, FileAccess.READ)
 	if ed != null:
 		world.load_edits(ed.get_buffer(ed.get_length()))
@@ -436,6 +611,16 @@ func _on_load_world(dir_name: String) -> void:
 	if fdf != null:
 		world.load_facing(fdf.get_buffer(fdf.get_length()))
 		fdf.close()
+	# flowing-fluid levels, likewise not derivable from the block ids
+	var wdf := FileAccess.open("%s/fluid.bin" % base, FileAccess.READ)
+	if wdf != null:
+		world.load_fluid(wdf.get_buffer(wdf.get_length()))
+		wdf.close()
+	# sign text, also not derivable from the block ids
+	var sg := FileAccess.open("%s/sign.bin" % base, FileAccess.READ)
+	if sg != null:
+		world.load_signs(sg.get_buffer(sg.get_length()))
+		sg.close()
 	# the circuit file has to be read *after* the edits, or the circuit blocks it
 	# refers to are not in the world yet and every one of them is dropped
 	if world.circuit != null:
@@ -498,7 +683,7 @@ func _begin_play() -> void:
 	ui.close_all()
 	hud.visible = true
 	player.set_input_enabled(true)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = _play_mouse_mode()
 	Sfx.start_music()
 	if _needs_spawn_fix:
 		_needs_spawn_fix = false
@@ -525,7 +710,7 @@ func _resume() -> void:
 	mode = Mode.PLAY
 	ui.close_all()
 	player.set_input_enabled(true)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = _play_mouse_mode()
 
 
 func _quit_to_title() -> void:
@@ -537,15 +722,18 @@ func _quit_to_title() -> void:
 		projectiles.clear()
 	containers.reset()
 	particles.clear()
+	_clear_xp_orbs()
 	_enter_title()
 
 
 func _respawn() -> void:
-	player.respawn(world.safe_spawn_near(world.terrain.find_spawn()))
+	# a bed the player slept in wins over the world spawn
+	var at: Vector3 = spawn_point if spawn_point != Vector3.ZERO else world.terrain.find_spawn()
+	player.respawn(world.safe_spawn_near(at))
 	mode = Mode.PLAY
 	ui.close_all()
 	player.set_input_enabled(true)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = _play_mouse_mode()
 
 
 func _on_died() -> void:
@@ -595,11 +783,327 @@ func _close_inventory() -> void:
 	hud.open_inventory(false)
 	hud.close_container()
 	player.set_input_enabled(true)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = _play_mouse_mode()
 
 
 func _on_table_opened(_pos: Vector3i) -> void:
 	_open_inventory(true)
+
+
+## Right-clicking a sign writes on it: the chat box is reused as a one-line editor,
+## opened with whatever is already on the sign, and the submitted line replaces it. An
+## empty line clears the sign.
+func _on_sign_opened(pos: Vector3i) -> void:
+	if mode != Mode.PLAY or _inv_open or hud.is_chat_open():
+		return
+	_chat_open = true
+	_console_mode = false
+	_sign_edit_pos = pos
+	hud.open_chat(world.sign_text_at(pos))
+	player.set_input_enabled(false)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+## Right-clicking a bed at night skips to morning and makes the bed the respawn point.
+## In daylight there is nothing to sleep through, so it just says so.
+func _on_bed_used(pos: Vector3i) -> void:
+	if mode != Mode.PLAY:
+		return
+	if not sky.is_night():
+		hud.toast(I18n.t("You can only sleep at night."))
+		Sfx.play("click", -10.0, 1.0)
+		return
+	# a night's sleep also clears whatever weather is up, as in Minecraft
+	sky.time_of_day = 0.26
+	sky.set_weather(sky.Weather.CLEAR, true)
+	spawn_point = Vector3(float(pos.x) + 0.5, float(pos.y), float(pos.z) + 0.5)
+	hud.toast(I18n.t("Good morning."))
+	Sfx.play("click", -6.0, 1.1)
+
+
+## Right-clicking the enchanting table offers up to three enchantments for the held
+## tool or armour. The panel is the HUD's; main owns the offers and the level check.
+func _on_enchant_opened(_pos: Vector3i) -> void:
+	if mode != Mode.PLAY or _inv_open or _enchant_open:
+		return
+	if Gear.enchantable(player.selected_id()).is_empty():
+		hud.toast(I18n.t("Hold a tool or a piece of armour to enchant it."))
+		return
+	_enchant_offers = _roll_enchant_offers()
+	if _enchant_offers.is_empty():
+		return
+	_enchant_open = true
+	hud.open_enchant(_enchant_offers, "Level %d" % player.level)
+	player.set_input_enabled(false)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+## Three offers, drawn from what the held item can take. An offer is the item's current
+## level of that enchantment plus one, and costs that many player levels, so a second
+## level costs more than the first.
+func _roll_enchant_offers() -> Array:
+	var s: Dictionary = player.selected_stack()
+	var kinds: Array = Gear.enchantable(int(s["id"]))
+	var out: Array = []
+	if kinds.is_empty():
+		return out
+	for n in 3:
+		var e: String = str(kinds[randi() % kinds.size()])
+		var nl := Gear.ench_of(s, e) + 1
+		if nl > Gear.enchant_max(e):
+			nl = Gear.enchant_max(e)
+		out.append({"name": Gear.enchant_name(e), "e": e, "lvl": nl, "cost": nl})
+	return out
+
+
+func _on_enchant_choice(index: int) -> void:
+	if not _enchant_open or index < 0 or index >= _enchant_offers.size():
+		return
+	var o: Dictionary = _enchant_offers[index]
+	if not player.spend_levels(int(o["cost"])):
+		hud.toast(I18n.t("Not enough levels."))
+		Sfx.play("click", -12.0, 0.8)
+		return
+	var s: Dictionary = player.selected_stack()
+	Gear.set_ench(s, str(o["e"]), int(o["lvl"]))
+	player.hotbar_changed.emit()
+	hud.toast(I18n.t("Enchanted!"))
+	Sfx.play("click", -5.0, 1.25)
+	_close_enchant()
+
+
+func _close_enchant() -> void:
+	if not _enchant_open:
+		return
+	_enchant_open = false
+	hud.close_enchant()
+	if mode == Mode.PLAY and not _inv_open:
+		player.set_input_enabled(true)
+		Input.mouse_mode = _play_mouse_mode()
+
+
+# ================================================================ trading
+## Right-clicking a villager opens its stall. The offers come from the villager's
+## profession, which is a pure function of where it stands, so a village's shopkeepers
+## are the same every time without a single byte of saved state.
+func _on_villager_used(mob) -> void:
+	if mode != Mode.PLAY or _inv_open or _enchant_open or _trade_open:
+		return
+	var prof := str(mob.profession)
+	if prof == "":
+		prof = "Farmer"
+	_trade_offers = _villager_offers(prof)
+	if _trade_offers.is_empty():
+		return
+	_trade_open = true
+	hud.open_trade(I18n.t(prof), _trade_offer_lines(_trade_offers),
+		I18n.t("Click a trade to make it."))
+	player.set_input_enabled(false)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+## What each profession buys and sells. `get` ids may be blocks as well as items, since
+## `player.give` takes the same integer either way.
+func _villager_offers(prof: String) -> Array:
+	match prof:
+		"Farmer":
+			return [
+				{"give": Blocks.ITEM_WHEAT, "give_n": 20, "get": Blocks.ITEM_EMERALD, "get_n": 1},
+				{"give": Blocks.ITEM_EMERALD, "give_n": 1, "get": Blocks.ITEM_BREAD, "get_n": 6},
+			]
+		"Butcher":
+			return [
+				{"give": Blocks.ITEM_BEEF_RAW, "give_n": 12, "get": Blocks.ITEM_EMERALD, "get_n": 1},
+				{"give": Blocks.ITEM_EMERALD, "give_n": 1, "get": Blocks.ITEM_PORKCHOP_COOKED, "get_n": 4},
+			]
+		"Smith":
+			return [
+				{"give": Blocks.ITEM_COAL, "give_n": 15, "get": Blocks.ITEM_EMERALD, "get_n": 1},
+				{"give": Blocks.ITEM_EMERALD, "give_n": 1, "get": Blocks.ITEM_IRON, "get_n": 3},
+			]
+		"Mason":
+			return [
+				{"give": Blocks.COBBLESTONE, "give_n": 20, "get": Blocks.ITEM_EMERALD, "get_n": 1},
+				{"give": Blocks.ITEM_EMERALD, "give_n": 1, "get": Blocks.STONE_BRICK, "get_n": 8},
+			]
+	return []
+
+
+func _trade_offer_lines(offers: Array) -> Array:
+	var out: Array = []
+	for o in offers:
+		out.append("%d %s  ->  %d %s" % [int(o["give_n"]), Items.name_of(int(o["give"])),
+			int(o["get_n"]), Items.name_of(int(o["get"]))])
+	return out
+
+
+func _on_trade_choice(index: int) -> void:
+	if not _trade_open or index < 0 or index >= _trade_offers.size():
+		return
+	var o: Dictionary = _trade_offers[index]
+	var gid: int = int(o["give"])
+	var gn: int = int(o["give_n"])
+	var rid: int = int(o["get"])
+	var rn: int = int(o["get_n"])
+	if not player.creative and player.count_of(gid) < gn:
+		hud.toast(I18n.tf("You need %d %s.", [gn, Items.name_of(gid)]))
+		Sfx.play("click", -12.0, 0.8)
+		return
+	# the goods have to fit before the payment is taken, or a full bag would eat the
+	# payment and hand back nothing
+	if not player.can_accept(rid):
+		hud.toast(I18n.t("Your inventory is full."))
+		Sfx.play("click", -12.0, 0.8)
+		return
+	if not player.creative:
+		player.remove_count(gid, gn)
+	player.give(rid, rn)
+	player.notify_inventory_changed()
+	hud.toast(I18n.tf("Traded for %d %s.", [rn, Items.name_of(rid)]))
+	Sfx.play("click", -5.0, 1.2)
+
+
+func _close_trade() -> void:
+	if not _trade_open:
+		return
+	_trade_open = false
+	_trade_offers = []
+	hud.close_trade()
+	if mode == Mode.PLAY and not _inv_open:
+		player.set_input_enabled(true)
+		Input.mouse_mode = _play_mouse_mode()
+
+
+## One emitter for both rain and snow: a box of billboards above the player. Snow is the
+## same node re-tuned to smaller, slower, paler flakes.
+func _build_weather_fx() -> void:
+	weather_fx = CPUParticles3D.new()
+	weather_fx.name = "Weather"
+	weather_fx.amount = 500
+	weather_fx.lifetime = 1.1
+	weather_fx.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	weather_fx.emission_box_extents = Vector3(14.0, 0.2, 14.0)
+	weather_fx.direction = Vector3(0, -1, 0)
+	weather_fx.spread = 0.0
+	weather_fx.gravity = Vector3.ZERO
+	weather_fx.visible = false
+	add_child(weather_fx)
+	_apply_weather_look(false)
+
+
+func _apply_weather_look(snow: bool) -> void:
+	_weather_snow = snow
+	if weather_fx == null:
+		return
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	m.albedo_color = Color(0.92, 0.94, 0.98, 0.85) if snow else Color(0.62, 0.72, 0.92, 0.55)
+	var q := QuadMesh.new()
+	q.size = Vector2(0.09, 0.09) if snow else Vector2(0.025, 0.7)
+	q.material = m
+	weather_fx.mesh = q
+	if snow:
+		weather_fx.initial_velocity_min = 1.4
+		weather_fx.initial_velocity_max = 2.6
+	else:
+		weather_fx.initial_velocity_min = 16.0
+		weather_fx.initial_velocity_max = 24.0
+
+
+## Drives the emitter from the sky's weather and the biome the player stands in.
+func _update_weather(delta: float) -> void:
+	if weather_fx == null:
+		return
+	var wet: float = sky.rain_level
+	if wet <= 0.02:
+		weather_fx.visible = false
+		return
+	weather_fx.visible = true
+	weather_fx.global_position = player.global_position + Vector3(0, 11.0, 0)
+	var bio: int = world.terrain.biome_at(floori(player.global_position.x),
+		floori(player.global_position.z))
+	var snow: bool = bio == VoxelTerrain.B_SNOWY
+	if snow != _weather_snow:
+		_apply_weather_look(snow)
+	var fl: float = sky.thunder_flash()
+	if fl > 0.5 and _prev_flash <= 0.5:
+		Sfx.play("click", -16.0, 0.55)
+	_prev_flash = fl
+
+
+## Experience orbs. `amount` is split into a few motes so a diamond ore throws a small
+## shower rather than one big sphere. They arc out, fall under their own gravity, then
+## home in once the player is close and are absorbed on contact.
+func _spawn_xp(pos: Vector3, amount: int) -> void:
+	if amount <= 0 or xp_fx == null:
+		return
+	var left := amount
+	while left > 0:
+		var v := mini(left, 2 + randi() % 3)
+		left -= v
+		var mi := MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 0.085
+		sm.height = 0.17
+		mi.mesh = sm
+		mi.material_override = _xp_material()
+		mi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+		xp_fx.add_child(mi)
+		mi.global_position = pos + Vector3(randf_range(-0.25, 0.25),
+			randf_range(0.0, 0.4), randf_range(-0.25, 0.25))
+		xp_orbs.append({"node": mi, "value": v,
+			"vel": Vector3(randf_range(-1.4, 1.4), randf_range(2.0, 3.2),
+				randf_range(-1.4, 1.4))})
+
+
+func _xp_material() -> StandardMaterial3D:
+	if _xp_orb_mat == null:
+		_xp_orb_mat = StandardMaterial3D.new()
+		_xp_orb_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_xp_orb_mat.albedo_color = Color(0.62, 1.0, 0.28)
+		_xp_orb_mat.emission_enabled = true
+		_xp_orb_mat.emission = Color(0.55, 1.0, 0.25)
+		_xp_orb_mat.emission_energy_multiplier = 2.4
+	return _xp_orb_mat
+
+
+func _update_xp_orbs(delta: float) -> void:
+	if xp_orbs.is_empty():
+		return
+	var target: Vector3 = player.global_position + Vector3(0, 0.85, 0)
+	var alive: Array = []
+	for o in xp_orbs:
+		var n = o["node"]
+		if not is_instance_valid(n):
+			continue
+		var to_p: Vector3 = target - n.global_position
+		var d := to_p.length()
+		if d < 4.5:
+			o["vel"] = (o["vel"] as Vector3).lerp(to_p.normalized() * 7.0,
+				clampf(delta * 5.0, 0.0, 1.0))
+		else:
+			o["vel"] = (o["vel"] as Vector3) + Vector3(0, -18.0 * delta, 0)
+			if (o["vel"] as Vector3).y < -12.0:
+				o["vel"] = Vector3((o["vel"] as Vector3).x, -12.0, (o["vel"] as Vector3).z)
+		n.global_position += (o["vel"] as Vector3) * delta
+		if d < 0.65:
+			player.add_xp(int(o["value"]))
+			Sfx.play("pop", -15.0, randf_range(1.3, 1.6))
+			n.queue_free()
+			continue
+		alive.append(o)
+	xp_orbs = alive
+
+
+## Frees every orb at once, when a world is left or reloaded.
+func _clear_xp_orbs() -> void:
+	for o in xp_orbs:
+		var n = o["node"]
+		if is_instance_valid(n):
+			n.queue_free()
+	xp_orbs.clear()
 
 
 func _on_container_opened(pos: Vector3i) -> void:
@@ -656,10 +1160,11 @@ func _close_chat() -> void:
 		return
 	_chat_open = false
 	_console_mode = false
+	_sign_edit_pos = Vector3i.ZERO
 	hud.close_chat()
 	if mode == Mode.PLAY and not _inv_open:
 		player.set_input_enabled(true)
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		Input.mouse_mode = _play_mouse_mode()
 
 
 func is_chat_open() -> bool:
@@ -668,6 +1173,12 @@ func is_chat_open() -> bool:
 
 func _on_chat_submitted(text: String) -> void:
 	hud.remember_line(text)
+	# a line typed while writing on a sign is the sign's text, not a chat message
+	var sign_pos := _sign_edit_pos
+	if sign_pos != Vector3i.ZERO:
+		world.set_sign_text(sign_pos, text)
+		_close_chat()
+		return
 	var console := _console_mode
 	_close_chat()
 	var t := text.strip_edges()
@@ -702,6 +1213,9 @@ func _save_game() -> void:
 		"cheats": _cheats,
 		"render_distance": world.render_distance,
 		"time": sky.time_of_day,
+		"weather": int(sky.weather),
+		"weather_timer": sky.weather_timer,
+		"spawn": [spawn_point.x, spawn_point.y, spawn_point.z],
 		"player": player.save_state(),
 		"saved_at": Time.get_datetime_string_from_system(),
 	}
@@ -718,6 +1232,16 @@ func _save_game() -> void:
 	if ff != null:
 		ff.store_buffer(world.serialize_facing())
 		ff.close()
+	# so are the fluid levels: a flowing cell and a source are both plain water
+	var wf := FileAccess.open("%s/fluid.bin" % base, FileAccess.WRITE)
+	if wf != null:
+		wf.store_buffer(world.serialize_fluid())
+		wf.close()
+	# and so is the text on a sign
+	var sgf := FileAccess.open("%s/sign.bin" % base, FileAccess.WRITE)
+	if sgf != null:
+		sgf.store_buffer(world.serialize_signs())
+		sgf.close()
 	# circuit state is not derivable from the blocks alone -- a lever's position and
 	# a piston's arm are not in the voxel data -- so it gets its own file
 	if world.circuit != null:
@@ -801,10 +1325,24 @@ func _leave_window() -> void:
 	# Free the OS grab first and unconditionally, independent of what the game mode does
 	# next: as long as the mode stays CAPTURED the pointer is clipped to our window, so
 	# this is the part that must not be skipped.
-	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	if Input.mouse_mode != Input.MOUSE_MODE_VISIBLE:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if mode == Mode.PLAY:
 		_pause()
+
+
+## The mode to hold while actually playing. Captured clips the pointer to the window,
+## which is what an unbounded first-person camera needs, but it is also an OS grab that
+## follows the cursor into nothing -- so it is a setting, and turning it off leaves the
+## pointer free (look then stops when it reaches the window edge).
+func _play_mouse_mode() -> int:
+	return Input.MOUSE_MODE_CAPTURED if Settings.lock_mouse else Input.MOUSE_MODE_VISIBLE
+
+
+## True while the game is showing a panel that needs a free pointer: the inventory, the
+## enchant or trade panel, the chat box, or anything other than live play.
+func _menu_open() -> bool:
+	return _inv_open or _enchant_open or _trade_open or _chat_open or mode != Mode.PLAY
 
 
 # ================================================================ input
@@ -823,12 +1361,20 @@ func _unhandled_input(event: InputEvent) -> void:
 	match mode:
 		Mode.PLAY:
 			if k == KEY_ESCAPE:
-				if _inv_open:
+				if _trade_open:
+					_close_trade()
+				elif _enchant_open:
+					_close_enchant()
+				elif _inv_open:
 					_close_inventory()
 				else:
 					_pause()
 			elif k == KEY_E:
-				if _inv_open:
+				if _trade_open:
+					_close_trade()
+				elif _enchant_open:
+					_close_enchant()
+				elif _inv_open:
 					_close_inventory()
 				else:
 					_open_inventory()
@@ -879,6 +1425,18 @@ func _grow_crops(delta: float) -> void:
 				world.set_block(pos.x, pos.y, pos.z, id + 1)
 
 
+## Sign labels are Node3D text the streaming cannot see, so they are reconciled here,
+## a few times a second rather than every frame: the set of signs is small and the walk
+## only creates or frees one when the player crosses in or out of range of it.
+func _sync_signs(delta: float) -> void:
+	_sign_t -= delta
+	if _sign_t > 0.0:
+		return
+	_sign_t = 0.4
+	if not world.sign_text.is_empty() or not world._sign_labels.is_empty():
+		world.sync_sign_labels(player.global_position)
+
+
 func _process(delta: float) -> void:
 	_fps_smooth = lerpf(_fps_smooth, 1.0 / maxf(delta, 0.0001), clampf(delta * 6.0, 0.0, 1.0))
 	# Backstop for the capture grab: if the pointer is still captured and our window is no
@@ -887,6 +1445,11 @@ func _process(delta: float) -> void:
 	# the game rect even after switching to another window.
 	if _capture == "" and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not get_window().has_focus():
 		_leave_window()
+	# A panel must never hold the pointer: whatever path opened it, while any menu is up
+	# the cursor is free. A release missed in one of the open/close paths would otherwise
+	# leave it clipped inside the window until the next alt-tab.
+	if _capture == "" and _menu_open() and Input.mouse_mode != Input.MOUSE_MODE_VISIBLE:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if mode == Mode.PLAY or mode == Mode.LOADING:
 		sky.advance(delta)
 		var in_water: bool = player.head_in_water()
@@ -897,8 +1460,12 @@ func _process(delta: float) -> void:
 		# this is a dictionary lookup on a quiet frame
 		if world.circuit != null:
 			world.circuit.update(delta)
+		world.step_fluids(delta)
 		containers.update(delta)
 		_grow_crops(delta)
+		_sync_signs(delta)
+		_update_weather(delta)
+		_update_xp_orbs(delta)
 		mobs.update(player.global_position, delta, sky.is_night())
 		projectiles.update(player.global_position, delta)
 		item_entities.update(player.global_position, delta)
@@ -1040,13 +1607,17 @@ func _run_selftest() -> void:
 	_check("survival mode", player.creative == false)
 	_check("in play mode and grounded", mode == Mode.PLAY and player.on_ground,
 		"mode=%d on_ground=%s" % [mode, str(player.on_ground)])
+	# hold the weather still for the run: a random storm mid-test would dim the sun the
+	# day/night check looks at, and the weather itself is exercised explicitly further on
+	sky.set_weather(sky.Weather.CLEAR, true)
+	sky.weather_timer = 1.0e9
 
 	# 2b. mouse look must work through the real event pipeline (GUI layers get first
 	#     refusal on mouse events, so this is exactly the kind of bug that only a
 	#     synthesised event can catch)
 	var yaw_before: float = player.yaw
 	var pitch_before: float = player.pitch
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = _play_mouse_mode()
 	for i in 3:
 		await get_tree().process_frame
 	var mm := InputEventMouseMotion.new()
@@ -1207,8 +1778,19 @@ func _run_selftest() -> void:
 	_check("result taken to cursor", int(player.cursor_stack["id"]) == Blocks.PLANKS
 		and int(player.cursor_stack["count"]) == 4, str(player.cursor_stack))
 	_check("ingredients consumed", int(player.crafting[0]["count"]) == 1)
-	hud._on_inv_slot(300, MOUSE_BUTTON_LEFT)
+	hud._on_inv_slot(hud.PAL_BASE, MOUSE_BUTTON_LEFT)
 	_check("creative palette still grants items", int(player.cursor_stack["count"]) == 64)
+	player.cursor_stack = {"id": 0, "count": 0}
+	# an armour slot must actually take an armour piece. It used to be swallowed by the
+	# palette branch, whose index range ran straight through the armour slots, so clicking
+	# armour did nothing at all.
+	player.cursor_stack = {"id": Blocks.ITEM_IRON_HELMET, "count": 1}
+	hud._on_inv_slot(430, MOUSE_BUTTON_LEFT)
+	_check("an armour slot accepts its piece",
+		int(player.armor[0]["id"]) == Blocks.ITEM_IRON_HELMET,
+		Blocks.display_name(int(player.armor[0]["id"])))
+	hud._on_inv_slot(430, MOUSE_BUTTON_LEFT)
+	_check("armour can be taken back off", int(player.armor[0]["id"]) == 0)
 	player.cursor_stack = {"id": 0, "count": 0}
 	_close_inventory()
 	_check("inventory closed", not hud.is_inventory_open())
@@ -1243,7 +1825,8 @@ func _run_selftest() -> void:
 			Blocks.display_name(ore_back), ore_back,
 			int(world.edits.get(Vector3i(spot.x, spot.y + 3, spot.z), -1))])
 
-	# 8. day/night
+	# 8. day/night. Weather would dim the sun, so this also proves the sky is clear first.
+	sky.set_weather(sky.Weather.CLEAR, true)
 	sky.time_of_day = 0.0
 	sky.update_sky(0.016)
 	_check("midnight is dark", sky.sun.light_energy < 0.05, "energy=%.2f" % sky.sun.light_energy)
@@ -1263,11 +1846,71 @@ func _run_selftest() -> void:
 	player.third_person = false
 	for i in 4:
 		await get_tree().physics_frame
-	# first person keeps the limbs and drops the head and chest: the limbs are what you
-	# see looking down, and the body has to stay *drawn* for any of it to cast a shadow
-	_check("player body stays drawn in first person, minus the head and chest",
-		player.model.visible and not player.model.head.visible
-			and not player.model.torso.visible and player.model.leg_r.visible)
+	# first person keeps the whole body drawn; the head and the right arm are switched to
+	# SHADOWS_ONLY rather than hidden, so the player's shadow on the ground keeps its head
+	# and arm. The chest stays fully drawn -- hiding it is what made it vanish from both the
+	# view and the shadow.
+	_check("player body stays drawn in first person, head and right arm shadow-only",
+		player.model.visible and player.model.torso.visible
+			and player.model.arm_l.visible and player.model.leg_r.visible
+			and player.model.head.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+			and player.model.arm_r.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY)
+
+	# Crouching has to answer in the *view*, not just in the body: sneaking drops the eye
+	# 0.35. It is asserted in flight as well, because in creative a double-tapped Space
+	# turns on flight, where Shift descends instead of crouching -- and a crouch that
+	# silently does nothing there is what "sneaking no longer changes the view" was.
+	var eye_standing: float = player.cam_pivot.position.y
+	Input.action_press("sneak")
+	for i in 30:
+		await get_tree().physics_frame
+	var eye_crouched: float = player.cam_pivot.position.y
+	_check("crouching drops the first-person eye",
+		eye_crouched < eye_standing - 0.30,
+		"%.2f -> %.2f" % [eye_standing, eye_crouched])
+	player.flying = true
+	for i in 30:
+		await get_tree().physics_frame
+	_check("and it still drops while flying",
+		player.cam_pivot.position.y < eye_standing - 0.30,
+		"%.2f" % player.cam_pivot.position.y)
+	player.flying = false
+	Input.action_release("sneak")
+	for i in 30:
+		await get_tree().physics_frame
+	_check("standing back up raises the eye again",
+		absf(player.cam_pivot.position.y - eye_standing) < 0.05,
+		"%.2f vs %.2f" % [player.cam_pivot.position.y, eye_standing])
+
+	# The forward offset must never push the eye into the block you are standing against:
+	# the block face sits 0.3 away, so a fixed offset leaves the eye inside the camera's
+	# near plane and the world goes see-through. A wall two blocks ahead is the cheap,
+	# deterministic version of that.
+	player.yaw = 0.0
+	player.pitch = 0.0
+	player.flying = true
+	var wall_x := floori(player.global_position.x)
+	var wall_y := floori(player.global_position.y)
+	var wall_z := floori(player.global_position.z)
+	# the player's own cell is whichever one the body centre sits in; build the wall just
+	# outside its 0.3 half-width, straight ahead in -z
+	for wall_dy in 3:
+		world.set_block(wall_x, wall_y + wall_dy, wall_z - 1, Blocks.STONE)
+	# Stand right up against it. The test has to *create* the tight case: from the middle
+	# of a cell there is half a block of room and nothing needs clamping, which is what an
+	# earlier version of this check measured by mistake. The body's half-width is 0.3, so
+	# parking the centre 0.31 from the cell edge leaves the face 0.31 away -- the real
+	# "standing against a wall" case.
+	player.place_at(Vector3(player.global_position.x, player.global_position.y,
+		float(wall_z) + 0.31))
+	for i in 30:
+		await get_tree().physics_frame
+	_check("the eye is pulled clear of the wall it faces",
+		player.cam_pivot.position.z > -0.28 + 0.001,
+		"eye_fwd=%.3f" % -player.cam_pivot.position.z)
+	for wall_dy in 3:
+		world.set_block(wall_x, wall_y + wall_dy, wall_z - 1, Blocks.AIR)
+	player.flying = false
 
 	# 9c. sprinting with Ctrl actually moves you faster than walking
 	player.yaw = 0.0
@@ -1320,6 +1963,66 @@ func _run_selftest() -> void:
 		if found_water:
 			break
 	_check("water generated somewhere", found_water)
+
+	# 9b. fluids. Built on a synthetic shelf far from the player's chunk, because the
+	# world run is live and a fixture at (0,0) would replace the chunk under his feet.
+	var fl_o := 50 * 16
+	var fl_c := Vector2i(50, 50)
+	var fl_writes: Array = []
+	_box(fl_writes, 0, 15, 40, 40, 0, 15, Blocks.STONE)
+	world.chunks[fl_c] = _mk_chunk(fl_writes)
+	var fl_src := Vector3i(fl_o + 8, 41, fl_o + 8)
+	var fl_e := Vector3i(fl_o + 9, 41, fl_o + 8)
+	var fl_west := Vector3i(fl_o + 7, 41, fl_o + 8)
+	world.apply_edit(fl_src, Blocks.WATER, false, false)
+	for i in 20:
+		world.step_fluids(1.0)
+	var fl_spread: Vector3i = fl_e if world.get_block(fl_e.x, fl_e.y, fl_e.z) == Blocks.WATER \
+		else fl_west
+	_check("a water source spreads to its neighbour",
+		world.get_block(fl_e.x, fl_e.y, fl_e.z) == Blocks.WATER
+		or world.get_block(fl_west.x, fl_west.y, fl_west.z) == Blocks.WATER,
+		"east=%d west=%d" % [world.get_block(fl_e.x, fl_e.y, fl_e.z),
+			world.get_block(fl_west.x, fl_west.y, fl_west.z)])
+	_check("what spreads is a flowing cell, not a source",
+		world.fluid.has(fl_spread) and int(world.fluid[fl_spread]) < 8,
+		"level=%d" % int(world.fluid.get(fl_spread, -1)))
+	# take the source away and the tongue has to dry up
+	world.apply_edit(fl_src, Blocks.AIR, false, false)
+	for i in 30:
+		world.step_fluids(1.0)
+	_check("removing the source drains what it fed",
+		world.get_block(fl_e.x, fl_e.y, fl_e.z) != Blocks.WATER
+		and world.get_block(fl_west.x, fl_west.y, fl_west.z) != Blocks.WATER)
+	# water meeting a lava source freezes it
+	var fl_lv := Vector3i(fl_o + 4, 41, fl_o + 8)
+	var fl_wt := Vector3i(fl_o + 5, 41, fl_o + 8)
+	world.apply_edit(fl_lv, Blocks.LAVA, false, false)
+	world.apply_edit(fl_wt, Blocks.WATER, false, false)
+	for i in 8:
+		world.step_fluids(1.0)
+	_check("a lava source touched by water becomes obsidian",
+		world.get_block(fl_lv.x, fl_lv.y, fl_lv.z) == Blocks.OBSIDIAN,
+		"got %s" % Blocks.display_name(world.get_block(fl_lv.x, fl_lv.y, fl_lv.z)))
+	# the levels are not derivable from the blocks, so they have to round trip
+	world.fluid[Vector3i(fl_o + 2, 41, fl_o + 2)] = 3
+	var fl_bytes: PackedByteArray = world.serialize_fluid()
+	world.fluid.clear()
+	world.load_fluid(fl_bytes)
+	_check("fluid levels survive a save round trip",
+		int(world.fluid.get(Vector3i(fl_o + 2, 41, fl_o + 2), -1)) == 3)
+	# and the mesher draws a flowing cell at its own level, not full height
+	var fl_buf = world.new_buf()
+	fl_buf.fluid(Vector3.ZERO, Blocks.tile_rect(Blocks.T_WATER), Color(1, 1, 1), 0.5, 63)
+	var fl_top := -9.0
+	for fl_v in fl_buf.v:
+		fl_top = maxf(fl_top, fl_v.y)
+	_check("a flowing cell meshes to its own level", is_equal_approx(fl_top, 0.5),
+		"max y=%.3f" % fl_top)
+	# leave the world as it was found
+	world.fluid.clear()
+	world._fluid_queue.clear()
+	world.chunks.erase(fl_c)
 
 	# 10. tools, armour and the block -> tool rules
 	_check("stone needs a pickaxe to drop",
@@ -1374,6 +2077,26 @@ func _run_selftest() -> void:
 	_check("panel facing survives save and load",
 		world.facing_override.get(pfpos, Vector3i.ZERO) == Vector3i(-1, 0, 0))
 
+	# a fence gate is its own shape now, and remembers its facing like a door does
+	world.set_place_look(Vector3(0, 0, -1))
+	world.set_block(13, 44, 9, Blocks.FENCE_GATE)
+	_check("a fence gate remembers which way it faces",
+		world.facing_override.get(Vector3i(13, 44, 9), Vector3i.ZERO) == Vector3i(0, 0, -1))
+	world.set_block(13, 44, 9, Blocks.FENCE_GATE_OPEN)
+	_check("a closed gate blocks and an open one does not",
+		Blocks.solid[Blocks.FENCE_GATE] == 1 and Blocks.solid[Blocks.FENCE_GATE_OPEN] == 0)
+	world.set_block(13, 44, 9, Blocks.AIR)
+
+	# a bed is two cells: breaking either half takes the other with it
+	var bedp := Vector3i(11, 44, 11)
+	world.set_place_look(Vector3(0, 0, 1))
+	world.set_block(bedp.x, bedp.y, bedp.z, Blocks.BED)
+	world.set_block(bedp.x, bedp.y, bedp.z + 1, Blocks.BED_HEAD)
+	player._break_block(bedp, Blocks.BED)
+	_check("breaking a bed takes its head with it",
+		world.get_block(bedp.x, bedp.y, bedp.z) == Blocks.AIR
+		and world.get_block(bedp.x, bedp.y, bedp.z + 1) == Blocks.AIR)
+
 	var fc := Vector3i(floori(player.global_position.x), floori(player.global_position.y),
 		floori(player.global_position.z))
 	world.set_block(fc.x, fc.y, fc.z, Blocks.LADDER)
@@ -1415,6 +2138,236 @@ func _run_selftest() -> void:
 	for i in 9:
 		player.crafting[i] = {"id": 0, "count": 0}
 
+	# 11b. building shapes: slabs, stairs, trapdoors, gates, signs, wool
+	# a clean column beside the player, so the shape tests do not trip over terrain
+	var sbx := floori(player.global_position.x) + 2
+	var sby := floori(player.global_position.y) + 3
+	var sbz := floori(player.global_position.z)
+	for sdy in 3:
+		world.set_block(sbx, sby + sdy, sbz, Blocks.AIR)
+	world.set_place_facing(Vector3i.ZERO)
+	world.set_block(sbx, sby, sbz, Blocks.SLAB)
+	_check("a slab is a half-height block",
+		world.collide_span(sbx, sby, sbz) == Vector2(0.0, 0.5),
+		str(world.collide_span(sbx, sby, sbz)))
+	# the same block, mounted on the underside of the block above: the top half
+	var scy := sby + 1
+	world.set_block(sbx, scy, sbz, Blocks.AIR)
+	world.set_place_facing(Vector3i(0, 1, 0))
+	world.set_block(sbx, scy, sbz, Blocks.SLAB)
+	_check("a ceiling slab occupies the top half",
+		world.collide_span(sbx, scy, sbz) == Vector2(0.5, 1.0),
+		str(world.collide_span(sbx, scy, sbz)))
+	world.set_place_facing(Vector3i.ZERO)
+	# and the collision reads through the real player test: you are stopped at the slab's
+	# bottom but stand free at its top
+	world.set_block(sbx, scy, sbz, Blocks.AIR)
+	var sfeet_lo := Vector3(float(sbx) + 0.5, float(sby), float(sbz) + 0.5)
+	var sfeet_hi := Vector3(float(sbx) + 0.5, float(sby) + 0.5, float(sbz) + 0.5)
+	_check("you collide with a slab at floor level", player._collides_at(sfeet_lo))
+	_check("you stand on top of a slab at half height", not player._collides_at(sfeet_hi))
+	# a stair's collision is the lower half, which is what makes a run climbable
+	world.set_block(sbx, sby, sbz, Blocks.AIR)
+	world.set_block(sbx, sby, sbz, Blocks.STAIRS)
+	_check("a stair's collision is the lower half",
+		world.collide_span(sbx, sby, sbz) == Vector2(0.0, 0.5))
+	world.set_block(sbx, sby, sbz, Blocks.AIR)
+
+	# trapdoor: a real right-click toggles it, and the id carries the state
+	var stx := sbx
+	var stz := sbz + 2
+	for sdy2 in 2:
+		world.set_block(stx, sby + sdy2, stz, Blocks.AIR)
+	world.set_block(stx, sby, stz, Blocks.TRAPDOOR)
+	_check("a trapdoor starts closed", world.get_block(stx, sby, stz) == Blocks.TRAPDOOR)
+	world.interact_block(Vector3i(stx, sby, stz), Blocks.TRAPDOOR)
+	_check("right-clicking a trapdoor opens it",
+		world.get_block(stx, sby, stz) == Blocks.TRAPDOOR_OPEN)
+	world.interact_block(Vector3i(stx, sby, stz), Blocks.TRAPDOOR_OPEN)
+	_check("right-clicking it again closes it", world.get_block(stx, sby, stz) == Blocks.TRAPDOOR)
+
+	# fence gate: closed blocks, open does not
+	var sgz := stz + 2
+	world.set_block(stx, sby, sgz, Blocks.AIR)
+	world.set_block(stx, sby, sgz, Blocks.FENCE_GATE)
+	_check("a closed gate blocks movement", world.is_solid(stx, sby, sgz))
+	world.interact_block(Vector3i(stx, sby, sgz), Blocks.FENCE_GATE)
+	_check("an open gate is walked through",
+		not world.is_solid(stx, sby, sgz) and world.get_block(stx, sby, sgz) == Blocks.FENCE_GATE_OPEN)
+
+	# wool and carpet: sixteen colours, wool opaque, carpet walked over
+	_check("wool is solid and occludes",
+		Blocks.solid[Blocks.WOOL_0] == 1 and Blocks.occluder[Blocks.WOOL_0] == 1)
+	_check("a carpet does not block movement", Blocks.solid[Blocks.CARPET_0] == 0)
+	var sdistinct := true
+	for sw in 16:
+		for sv in range(sw + 1, 16):
+			if Blocks.WOOL_COLORS[sw] == Blocks.WOOL_COLORS[sv]:
+				sdistinct = false
+	_check("the sixteen wool colours are distinct", sdistinct)
+	_check("wool, carpet and dye ids line up",
+		Blocks.wool_index(Blocks.WOOL_5) == 5 and Blocks.wool_index(Blocks.CARPET_5) == 5
+		and Blocks.wool_index(Blocks.ITEM_DYE_5) == 5 and Blocks.wool_index(Blocks.STONE) == -1)
+
+	# sign text survives its own save file
+	world.set_sign_text(Vector3i(stx, sby, stz), "hello world")
+	_check("a sign remembers its text", world.sign_text_at(Vector3i(stx, sby, stz)) == "hello world")
+	var ssign_blob: PackedByteArray = world.serialize_signs()
+	world.sign_text.clear()
+	world.load_signs(ssign_blob)
+	_check("sign text survives a save round trip",
+		world.sign_text_at(Vector3i(stx, sby, stz)) == "hello world",
+		world.sign_text_at(Vector3i(stx, sby, stz)))
+	world.set_sign_text(Vector3i(stx, sby, stz), "")
+	_check("an empty line clears a sign", world.sign_text_at(Vector3i(stx, sby, stz)) == "")
+
+	# the new shapes actually build geometry
+	var sshape_buf = world.new_buf()
+	sshape_buf.box(Vector3.ZERO, Vector3(1, 0.5, 1), Blocks.tile_rect(Blocks.T_STONE), Color.WHITE)
+	_check("a half-height box meshes faces", not sshape_buf.empty())
+
+	# and their recipes
+	var skeep_table: bool = player.table_available
+	for si in 9:
+		player.crafting[si] = {"id": 0, "count": 0}
+	player.table_available = true
+	for si2 in 3:
+		player.crafting[si2] = {"id": Blocks.STONE, "count": 1}
+	_check("three stone craft a slab", int(player.craft_result()["id"]) == Blocks.SLAB)
+	for si3 in 9:
+		player.crafting[si3] = {"id": 0, "count": 0}
+	for sc in [0, 3, 4, 6, 7, 8]:
+		player.crafting[sc] = {"id": Blocks.STONE, "count": 1}
+	_check("the stair shape crafts stairs", int(player.craft_result()["id"]) == Blocks.STAIRS)
+	for si4 in 9:
+		player.crafting[si4] = {"id": 0, "count": 0}
+	player.table_available = false
+	player.crafting[0] = {"id": Blocks.FLOWER_RED, "count": 1}
+	_check("a poppy yields red dye", int(player.craft_result()["id"]) == Blocks.ITEM_DYE_14)
+	player.crafting[0] = {"id": Blocks.WOOL_0, "count": 1}
+	player.crafting[1] = {"id": Blocks.ITEM_DYE_14, "count": 1}
+	_check("white wool and dye make coloured wool",
+		int(player.craft_result()["id"]) == Blocks.WOOL_14)
+	for si5 in 9:
+		player.crafting[si5] = {"id": 0, "count": 0}
+	player.table_available = skeep_table
+
+	# 11c. bed, sleep and weather
+	var sbed_x := sbx + 3
+	var sbed_z := sbz + 2
+	world.set_block(sbed_x, sby, sbed_z, Blocks.AIR)
+	world.set_block(sbed_x, sby, sbed_z, Blocks.BED)
+	_check("a bed is a low block",
+		world.collide_span(sbed_x, sby, sbed_z) == Vector2(0.0, 0.5625),
+		str(world.collide_span(sbed_x, sby, sbed_z)))
+	sky.running = false
+	sky.time_of_day = 0.5
+	var sdaytime: float = sky.time_of_day
+	world.interact_block(Vector3i(sbed_x, sby, sbed_z), Blocks.BED)
+	_check("a bed does nothing in daylight", sky.time_of_day == sdaytime)
+	sky.time_of_day = 0.0
+	_check("midnight is night", sky.is_night())
+	spawn_point = Vector3.ZERO
+	world.interact_block(Vector3i(sbed_x, sby, sbed_z), Blocks.BED)
+	_check("sleeping skips to morning",
+		not sky.is_night() and sky.time_of_day > 0.25, str(sky.time_of_day))
+	_check("a bed becomes the respawn point",
+		absf(spawn_point.x - (float(sbed_x) + 0.5)) < 0.01 and spawn_point.y == float(sby),
+		str(spawn_point))
+	sky.running = true
+
+	# weather: the state machine drives the sky, and clears again
+	sky.set_weather(sky.Weather.THUNDER, true)
+	_check("a storm is raining and thundering", sky.is_raining() and sky.is_thundering())
+	_check("a storm reaches full strength at once", sky.rain_level > 0.99)
+	sky.set_weather(sky.Weather.CLEAR, true)
+	_check("the weather clears again", not sky.is_raining() and sky.rain_level < 0.01)
+
+	# 11d. experience, enchanting and the two new species
+	player.xp = 0
+	player.level = 0
+	player.add_xp(player.xp_to_next() - 1)
+	_check("xp below the curve does not level up", player.level == 0, str(player.xp))
+	player.add_xp(1)
+	_check("crossing the curve levels up", player.level == 1 and player.xp == 0,
+		"lvl=%d xp=%d" % [player.level, player.xp])
+	player.add_xp(1000)
+	_check("a lot of xp climbs several levels", player.level > 5, "lvl=%d" % player.level)
+	_check("levels can be spent", player.spend_levels(2) and player.level >= 0)
+	_check("spending more levels than you have is refused",
+		not player.spend_levels(player.level + 5))
+
+	# an enchantment rides on the item stack and moves a real number
+	var epick := {"id": Blocks.ITEM_DIAMOND_PICK, "count": 1, "dur": 1562}
+	_check("a pickaxe can take efficiency",
+		Gear.enchantable(Blocks.ITEM_DIAMOND_PICK).has(Gear.ENCH_EFFICIENCY))
+	_check("a plain tool is unenchanted", Gear.ench_of(epick, Gear.ENCH_EFFICIENCY) == 0)
+	Gear.set_ench(epick, Gear.ENCH_EFFICIENCY, 2)
+	_check("the enchantment is stored on the stack", Gear.ench_of(epick, Gear.ENCH_EFFICIENCY) == 2)
+	_check("efficiency multiplies the mining speed", Gear.ench_speed_mult(epick) > 1.5)
+	var eblade := {"id": Blocks.ITEM_DIAMOND_SWORD, "count": 1, "dur": 1562}
+	Gear.set_ench(eblade, Gear.ENCH_SHARPNESS, 3)
+	_check("sharpness adds melee damage", Gear.ench_damage_bonus(eblade) > 3.0)
+	_check("a sword cannot take efficiency",
+		not Gear.enchantable(Blocks.ITEM_DIAMOND_SWORD).has(Gear.ENCH_EFFICIENCY))
+
+	# the table opens through the real right-click path and applying an offer works
+	var et_x := sbx + 4
+	var et_z := sbz + 4
+	world.set_block(et_x, sby, et_z, Blocks.AIR)
+	world.set_block(et_x, sby, et_z, Blocks.ENCHANTING_TABLE)
+	player.hotbar[player.selected] = {"id": Blocks.ITEM_DIAMOND_PICK, "count": 1, "dur": 1562}
+	player.hotbar_changed.emit()
+	player.add_xp(400)
+	world.interact_block(Vector3i(et_x, sby, et_z), Blocks.ENCHANTING_TABLE)
+	_check("the enchanting table opens three offers", _enchant_open and _enchant_offers.size() == 3)
+	var chosen: String = str(_enchant_offers[0]["e"])
+	var chosen_lv: int = int(_enchant_offers[0]["lvl"])
+	var levels_before: int = player.level
+	_on_enchant_choice(0)
+	_check("choosing an offer spends levels", player.level < levels_before)
+	_check("the panel closes after enchanting", not _enchant_open)
+	_check("the held tool carries the chosen enchantment",
+		Gear.ench_of(player.selected_stack(), chosen) == chosen_lv,
+		"%s=%d" % [chosen, Gear.ench_of(player.selected_stack(), chosen)])
+
+	# the two new species spawn, fight and yield their loot
+	var orb_before: int = xp_orbs.size()
+	var smob = mobs.spawn_at("slime", player.global_position + Vector3(2, 0, 2))
+	_check("a slime spawns as a hostile", smob.is_hostile())
+	_check("a slime has its own health", smob.health == 16.0, "%.0f" % smob.health)
+	smob.hurt_mob(100.0)
+	_check("killing something drops experience orbs", xp_orbs.size() > orb_before,
+		"%d -> %d" % [orb_before, xp_orbs.size()])
+	var emob = mobs.spawn_at("enderman", player.global_position + Vector3(3, 0, 3))
+	_check("an enderman spawns with enderman health", emob.health == 40.0, "%.0f" % emob.health)
+	emob.hurt_mob(100.0)
+	# Mob loot has to land in *every* mode, creative included: that gate is what made a
+	# creative player kill things and see nothing drop. Checked on a passive mob as well
+	# as a hostile, because the two go through different loot branches.
+	var loot_before: int = item_entities.items.size()
+	var pmob = mobs.spawn_at("pig", player.global_position + Vector3(1, 0, 1))
+	pmob.hurt_mob(100.0)
+	var pig_loot := ""
+	for it in item_entities.items:
+		if is_instance_valid(it):
+			if int(it.item_id) == Blocks.ITEM_PORKCHOP_RAW:
+				pig_loot = "porkchop"
+	_check("killing a pig drops a porkchop, in survival",
+		item_entities.items.size() > loot_before and pig_loot == "porkchop",
+		"%d -> %d, got %s" % [loot_before, item_entities.items.size(), pig_loot])
+	player.creative = true
+	loot_before = item_entities.items.size()
+	var cmob = mobs.spawn_at("cow", player.global_position + Vector3(-1, 0, -1))
+	cmob.hurt_mob(100.0)
+	_check("killing a cow drops its loot in creative too",
+		item_entities.items.size() > loot_before,
+		"%d -> %d" % [loot_before, item_entities.items.size()])
+	player.creative = false
+	_check("the new loot has names",
+		Blocks.display_name(Blocks.ITEM_SLIME_BALL) != "?"
+		and Blocks.display_name(Blocks.ITEM_ENDER_PEARL) != "?")
+
 	# 12. combat: mobs take damage, die, and a skeleton's arrow hurts the player
 	var mob = mobs.spawn_at("zombie", player.global_position + Vector3(3, 0, 0))
 	_check("a hostile mob spawns", mob.is_hostile())
@@ -1428,6 +2381,76 @@ func _run_selftest() -> void:
 	projectiles.spawn(player.global_position + Vector3(1.0, 0.9, 0), Vector3(-1, 0, 0), 26.0, 4.0, false)
 	projectiles.update(player.global_position, 0.05)
 	_check("an arrow fired at the player hurts them", player.health < php)
+
+	# 13. villages, villagers and trading
+	var vill = _find_village_near(0, 0, 800)
+	_check("the generator places villages", vill != null,
+		"none" if vill == null else "%d,%d" % [int(vill["ox"]), int(vill["oz"])])
+	if vill != null:
+		# the village's own chunk, built straight from the generator, must carry the
+		# plaza paving and the house timber -- proof the structure really was stamped
+		var built: Dictionary = world.terrain.fill_chunk(int(vill["ox"]) >> 4,
+			int(vill["oz"]) >> 4)
+		var found_brick := false
+		var found_planks := false
+		for si in built["sections"].keys():
+			var arr: PackedByteArray = built["sections"][si]
+			for b in arr:
+				if b == Blocks.STONE_BRICK:
+					found_brick = true
+				elif b == Blocks.PLANKS:
+					found_planks = true
+		_check("a village chunk holds its plaza and houses", found_brick and found_planks,
+			"brick=%s planks=%s" % [str(found_brick), str(found_planks)])
+		# the villager spawner finds a village through this exact call
+		_check("the spawner can locate a village",
+			world.terrain.nearest_village(int(vill["ox"]), int(vill["oz"]), 100) != null)
+	var vm = mobs.spawn_at("villager", player.global_position + Vector3(2, 0, 0))
+	_check("a villager is not hostile", not vm.is_hostile() and str(vm.kind) == "villager")
+	_check("a villager keeps a trade", str(vm.profession) != "", str(vm.profession))
+	# trade through the real path: open the stall, then take the first offer. Offer 0 is
+	# always the "goods for emeralds" side for every profession.
+	player.creative = false
+	_on_villager_used(vm)
+	_check("the trade panel opens", _trade_open)
+	var o0: Dictionary = _trade_offers[0]
+	var gid: int = int(o0["give"])
+	var want: int = int(o0["give_n"])
+	player.give(gid, want)
+	var gave_before: int = player.count_of(gid)
+	var em_before: int = player.count_of(Blocks.ITEM_EMERALD)
+	_on_trade_choice(0)
+	_check("a trade takes goods and pays emeralds",
+		player.count_of(Blocks.ITEM_EMERALD) == em_before + 1
+		and player.count_of(gid) == gave_before - want,
+		"%d emeralds, %d goods left" % [player.count_of(Blocks.ITEM_EMERALD),
+			player.count_of(gid)])
+	# and a trade with nothing to give is refused rather than going into debt
+	player.remove_count(gid, gave_before)
+	_on_trade_choice(0)
+	_check("a trade with nothing to give is refused",
+		player.count_of(Blocks.ITEM_EMERALD) == em_before + 1
+		and player.count_of(gid) == 0)
+	_close_trade()
+	_check("the trade panel closes", not _trade_open)
+
+	# 14. the ender pearl is used rather than placed: right-click moves you and spends it
+	player.creative = false
+	player.give(Blocks.ITEM_ENDER_PEARL, 1)
+	var pslot := -1
+	for i in 9:
+		if int(player.hotbar[i]["id"]) == Blocks.ITEM_ENDER_PEARL:
+			pslot = i
+	_check("an ender pearl lands in a hotbar slot", pslot >= 0)
+	if pslot >= 0:
+		player.select_slot(pslot)
+		var pbefore: Vector3 = player.global_position
+		var phit := Vector3i(floori(pbefore.x) + 6, floori(pbefore.y), floori(pbefore.z))
+		var used: bool = player._item_use({"pos": phit})
+		_check("an ender pearl teleports the player and is spent",
+			used and player.count_of(Blocks.ITEM_ENDER_PEARL) == 0
+			and player.global_position.distance_to(pbefore) > 1.0,
+			"moved %.1f" % player.global_position.distance_to(pbefore))
 
 	# The save did its job several checks ago; take it away again at the very end.
 	# Without this every run leaves another "Selftest_<timestamp>" world behind, and
@@ -1628,21 +2651,36 @@ func _hand_test() -> void:
 	player.hotbar_changed.emit()
 	player.select_slot(5)
 	player.third_person = false
-	# first person drops the head and the chest but keeps the limbs: the head because the
-	# camera is inside it, the chest because its flat top covers the bottom of the view as
-	# soon as you look down. The limbs staying drawn is also the whole reason a shadow
-	# lands on the ground now.
-	_check("first person keeps the limbs and drops the head and chest",
+	# first person keeps the entire body mesh, with the head and right arm demoted to the
+	# shadow pass so the camera never sees them but the shadow still does. The right arm is
+	# replaced in the view by the camera hand.
+	_check("first person keeps the body, head and right arm shadow-only, adds the camera hand",
 		player.cam_mode == 0 and not player.third_person and player.model.visible
-			and not player.model.head.visible and not player.model.torso.visible
-			and player.model.arm_r.visible and player.model.leg_r.visible
-			and player.model.held.visible,
+			and player.model.head.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+			and player.model.arm_r.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+			and player.model.torso.visible and player.model.arm_l.visible
+			and player.model.leg_r.visible and player.fp_hand.visible,
 		player.camera_mode_name())
+	# the carried torch: off with a block in hand, on with a torch, and it moves between
+	# the camera hand and the body's arm as the camera mode changes
+	_check("a block in hand carries no light",
+		not player.held_light_fp.visible and not player.held_light_body.visible)
+	player.hotbar[5] = {"id": Blocks.TORCH, "count": 5}
+	player.hotbar_changed.emit()
+	player.select_slot(5)
+	_check("a torch in hand lights the world in first person",
+		player.held_light_fp.visible and not player.held_light_body.visible)
 	player.cycle_camera()
-	_check("third person draws the whole body",
+	_check("and follows the hand into third person",
+		not player.held_light_fp.visible and player.held_light_body.visible)
+	_check("third person draws the whole body and no camera hand",
 		player.cam_mode == 1 and player.third_person and player.model.visible
 			and player.model.head.visible and player.model.torso.visible
-			and player.model.held.visible,
+			and player.model.arm_r.visible and not player.fp_hand.visible
+			# and the shadows-only demotion is undone: leaving it on would make the head
+			# and right arm invisible bodies that still cast shadows, in every other view
+			and player.model.head.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			and player.model.arm_r.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_ON,
 		player.camera_mode_name())
 	player.cycle_camera()
 	_check("second person is a front camera on the body",
@@ -1655,8 +2693,10 @@ func _hand_test() -> void:
 	_check("aim ignores the second-person camera flip",
 		player.look_dir().dot(Vector3(0, 0, -1)) > 0.9, str(player.look_dir()))
 	player.cycle_camera()
-	_check("F5 wraps back to first person, head hidden again",
-		player.cam_mode == 0 and not player.model.head.visible,
+	_check("F5 wraps back to first person, head shadowed again",
+		player.cam_mode == 0
+			and player.model.head.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+			and player.model.arm_r.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY,
 		player.camera_mode_name())
 
 	# a flipped cap or an inverted tiny box is invisible by eye on a 4 pixel limb,
@@ -2960,6 +4000,10 @@ func _check_capture() -> void:
 			_capture = "hostiles"
 		elif a == "--capture-station":
 			_capture = "station"
+		elif a == "--capture-lava":
+			_capture = "lava"
+		elif a == "--capture-build":
+			_capture = "build"
 		elif a == "--capture-reload":
 			_capture = "reload"
 		elif a == "--capture-create":
@@ -2968,11 +4012,115 @@ func _check_capture() -> void:
 			_capture = "worlds"
 		elif a == "--perf":
 			_capture = "perf"
+		elif a == "--capture-heldlight":
+			_capture = "heldlight"
+		elif a == "--capture-bed":
+			_capture = "bed"
+		elif a == "--capture-birch":
+			_capture = "birch"
+		elif a == "--capture-village":
+			_capture = "village"
+		elif a == "--capture-trade":
+			_capture = "trade"
+		elif a == "--capture-enchant":
+			_capture = "enchant"
+		elif a == "--capture-villager":
+			_capture = "villager"
+		elif a == "--capture-trapdoor":
+			_capture = "trapdoor"
+		elif a == "--capture-gate":
+			_capture = "gate"
+		elif a == "--dump-icons":
+			_capture = "icons"
+		elif a == "--netserve":
+			_capture = "netserve"
+		elif a == "--netjoin":
+			_capture = "netjoin"
 		elif a == "--probe":
 			_capture = "probe"
 	if _capture == "":
 		return
 	_run_capture()
+
+
+## The nearest village the generator will place within `max_dist` of (wx, wz), or null.
+## Scans the village grid cell by cell rather than every column, so it is cheap.
+func _find_village_near(wx: int, wz: int, max_dist: int):
+	var cell := VoxelTerrain.VILLAGE_CELL
+	var r := int(ceil(float(max_dist) / float(cell)))
+	var best = null
+	var best_d := max_dist * max_dist
+	var gx0 := floori(float(wx) / float(cell))
+	var gz0 := floori(float(wz) / float(cell))
+	for dx in range(-r, r + 1):
+		for dz in range(-r, r + 1):
+			var v = world.terrain.village_at(gx0 + dx, gz0 + dz)
+			if v == null or v.is_empty():
+				continue
+			var ddx: int = int(v["ox"]) - wx
+			var ddz: int = int(v["oz"]) - wz
+			var d := ddx * ddx + ddz * ddz
+			if d <= best_d:
+				best_d = d
+				best = v
+	return best
+
+
+# ================================================================ two-peer net test
+## Hosts a world on a fixed port and waits for a client to introduce itself and send one
+## edit. Run this in one process and `--netjoin` in another; the pair proves the handshake
+## and the block-edit round trip over a real ENet socket.
+func _net_serve() -> void:
+	print("=== net serve ===")
+	if not Net.host(14999, "Host"):
+		print("NET HOST FAIL")
+		return
+	_on_new_world("NetTest", 4242, true, 3, true)
+	world.authority = Net.HostAuthority.new()
+	await _wait_loaded()
+	print("NET HOST READY")
+	var got := [false, false]
+	Net.player_joined.connect(func(_id: int) -> void: got[0] = true)
+	Net.host_edit.connect(func(_p: Vector3i, _i: int) -> void: got[1] = true)
+	var t := 0.0
+	while not (got[0] and got[1]) and t < 60.0:
+		t += get_process_delta_time()
+		await get_tree().process_frame
+	if got[0] and got[1]:
+		print("NET HOST OK")
+	else:
+		print("NET HOST TIMEOUT joined=%s edit=%s" % [str(got[0]), str(got[1])])
+
+
+func _net_join() -> void:
+	print("=== net join ===")
+	Net.join_failed.connect(func(r: String) -> void:
+		print("NET JOIN FAIL ", r)
+		get_tree().quit())
+	Net.welcomed.connect(_net_test_welcomed)
+	Net.edited.connect(func(_p: Vector3i, _i: int) -> void: _net_ok = true)
+	if not Net.join("127.0.0.1", 14999, "Client"):
+		print("NET CLIENT START FAIL")
+		get_tree().quit()
+
+
+func _net_test_welcomed(seed_s: int, creative: bool, distance: int, cheats: bool,
+		edits: PackedByteArray) -> void:
+	print("NET CLIENT WELCOME seed=%d edits=%d" % [seed_s, edits.size()])
+	_seed_network_world(seed_s, creative, distance, cheats, edits)
+	await _wait_loaded()
+	await _settle()
+	var px := floori(player.global_position.x)
+	var pz := floori(player.global_position.z)
+	var py := floori(player.global_position.y) + 2
+	print("NET CLIENT READY; sending edit")
+	world.set_block(px + 1, py, pz, Blocks.STONE)
+	var t := 0.0
+	while not _net_ok and t < 60.0:
+		t += get_process_delta_time()
+		await get_tree().process_frame
+	print("NET OK" if _net_ok else "NET CLIENT TIMEOUT")
+	get_tree().quit()
 
 
 func _shot(file_name: String) -> void:
@@ -2998,6 +4146,25 @@ func _run_capture() -> void:
 			Blocks.tile_images[t].save_png("%s/tile_%02d.png" % [_capture_dir, t])
 		print("atlas dumped")
 		get_tree().quit()
+		return
+	if _capture == "icons":
+		DirAccess.make_dir_recursive_absolute(_capture_dir)
+		for id in range(1, 512):
+			if Blocks.defs[id] == null and Blocks.display_name(id) == "?":
+				continue
+			var img: Image = Items.icon_for(id, 64).get_image()
+			img.save_png("%s/icon_%03d.png" % [_capture_dir, id])
+		print("icons dumped")
+		get_tree().quit()
+		return
+	if _capture == "netserve":
+		await _net_serve()
+		get_tree().quit()
+		return
+	if _capture == "netjoin":
+		# no quit here: the join is asynchronous, and `_net_test_welcomed` quits when the
+		# host's confirmation of the edit comes back
+		_net_join()
 		return
 	if _capture == "selftest":
 		await _run_selftest()
@@ -3080,6 +4247,103 @@ func _run_capture() -> void:
 			player.yaw = 0.5
 			await _settle()
 			await _shot("world_aerial.png")
+		"heldlight":
+			# a torch in the hand, in an unlit stone room at midnight: the screenshot has
+			# to show the room lit by what the player is holding and by nothing else
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.0
+			sky.running = false
+			var hx := floori(player.global_position.x)
+			var hy := floori(player.global_position.y)
+			var hz := floori(player.global_position.z)
+			for dx in range(-6, 7):
+				for dz in range(-6, 7):
+					for dy in range(0, 5):
+						world.set_block(hx + dx, hy + dy, hz + dz, Blocks.AIR)
+					world.set_block(hx + dx, hy - 1, hz + dz, Blocks.STONE)
+			# walls and a ceiling, so there is no sky light in the shot at all
+			for dx in range(-6, 7):
+				for dy in range(0, 5):
+					world.set_block(hx + dx, hy + dy, hz - 6, Blocks.STONE)
+					world.set_block(hx + dx, hy + dy, hz + 6, Blocks.STONE)
+			for dz in range(-6, 7):
+				for dy in range(0, 5):
+					world.set_block(hx - 6, hy + dy, hz + dz, Blocks.STONE)
+					world.set_block(hx + 6, hy + dy, hz + dz, Blocks.STONE)
+			for dx in range(-6, 7):
+				for dz in range(-6, 7):
+					world.set_block(hx + dx, hy + 5, hz + dz, Blocks.STONE)
+			player.creative = true
+			player.flying = true
+			player.place_at(Vector3(float(hx) + 0.5, float(hy) + 1.2, float(hz) + 2.5))
+			player.hotbar[0] = {"id": Blocks.TORCH, "count": 64}
+			player.hotbar_changed.emit()
+			player.select_slot(0)
+			player.pitch = -0.18
+			player.yaw = 0.0
+			for i in 25:
+				await get_tree().physics_frame
+			await _shot("held_torch.png")
+		"bed":
+			# a bed square on, from just above standing height, so the frame, the
+			# overhanging mattress and the pillow are all readable at once
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.reset_inventory()
+			for i in 40:
+				await get_tree().physics_frame
+			var bx := floori(player.global_position.x)
+			var by := floori(player.global_position.y)
+			var bz := floori(player.global_position.z)
+			# clear a patch, lay a floor, then two beds crossing so both pillow
+			# orientations are in the same frame
+			for dx in range(-4, 5):
+				for dz in range(-4, 5):
+					for dy in range(0, 4):
+						world.set_block(bx + dx, by + dy, bz + dz, Blocks.AIR)
+					world.set_block(bx + dx, by - 1, bz + dz, Blocks.PLANKS)
+			world.set_place_look(Vector3(0, -1, 1))
+			world.set_block(bx, by, bz - 2, Blocks.BED)
+			world.set_block(bx, by, bz - 1, Blocks.BED_HEAD)
+			world.set_place_look(Vector3(1, -1, 0))
+			world.set_block(bx + 2, by, bz - 2, Blocks.BED)
+			world.set_block(bx + 3, by, bz - 2, Blocks.BED_HEAD)
+			world.set_place_look(Vector3(0, -1, 1))
+			player.place_at(Vector3(float(bx) + 0.5, float(by) + 0.2, float(bz) + 1.5))
+			player.creative = true
+			player.flying = true
+			player.pitch = -0.30
+			player.yaw = 0.0
+			for i in 25:
+				await get_tree().physics_frame
+			await _shot("bed.png")
+		"birch":
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			# hunt outward for a birch wood and stand in the middle of it
+			var at := Vector3.ZERO
+			var found := false
+			for ring in range(8, 160, 8):
+				for a in 16:
+					var ang := TAU * float(a) / 16.0
+					var cx := int(cos(ang) * float(ring))
+					var cz := int(sin(ang) * float(ring))
+					if world.terrain.biome_at(cx, cz) == VoxelTerrain.B_BIRCH_FOREST:
+						at = Vector3(float(cx) + 0.5, 0.0, float(cz) + 0.5)
+						found = true
+						break
+				if found:
+					break
+			print("birch at ", at, " found=", found)
+			player.place_at(world.safe_spawn_near(at))
+			await _settle()
+			player.pitch = -0.12
+			await _shot("birch_forest.png")
 		"diag":
 			_on_new_world("Preview", _capture_seed, true, 5)
 			await _wait_loaded()
@@ -3129,6 +4393,99 @@ func _run_capture() -> void:
 			for i in 90:
 				await get_tree().physics_frame
 			await _shot("mobs.png")
+		"build":
+			# a frontal showcase of the new shapes: a stair run, a slab platform with a
+			# ceiling slab, a wall of all sixteen wools, a carpet strip, a trapdoor, a
+			# fenced gate and a written sign
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.creative = true
+			player.yaw = 0.0
+			var bp_x := floori(player.global_position.x)
+			var bp_y := floori(player.global_position.y)
+			var bp_z := floori(player.global_position.z)
+			# clear a stage in front of the player, then build on it
+			for dx in range(-6, 8):
+				for dy in range(0, 6):
+					for dz in range(-6, 2):
+						world.set_block(bp_x + dx, bp_y + dy, bp_z + dz, Blocks.AIR)
+			var wz := bp_z - 5
+			# stairs ascending east, then a slab platform
+			for s in 4:
+				world.set_place_facing(Vector3i(1, 0, 0))
+				world.set_block(bp_x - 4 + s, bp_y + s, wz, Blocks.STAIRS)
+			world.set_place_facing(Vector3i.ZERO)
+			world.set_block(bp_x, bp_y + 4, wz, Blocks.SLAB)
+			world.set_place_facing(Vector3i(0, 1, 0))
+			world.set_block(bp_x + 1, bp_y + 4, wz, Blocks.SLAB)
+			world.set_place_facing(Vector3i.ZERO)
+			# a wall of the sixteen wools behind, and a carpet strip in front
+			for i in 16:
+				world.set_block(bp_x - 4 + (i % 8), bp_y + 1 + (i / 8), wz - 1, Blocks.WOOL_0 + i)
+				world.set_block(bp_x - 4 + i % 8, bp_y, wz + 1 + (i / 8), Blocks.CARPET_0 + i)
+			# a fence line with a gate, and a trapdoor
+			for dz in range(-2, 3):
+				if dz == 0:
+					world.set_block(bp_x + 4, bp_y, wz + dz, Blocks.FENCE_GATE)
+				else:
+					world.set_block(bp_x + 4, bp_y, wz + dz, Blocks.FENCE)
+			world.set_block(bp_x + 2, bp_y, wz + 1, Blocks.TRAPDOOR)
+			# two open trapdoors, one hinged each way: a thin board seen edge-on is exactly
+			# where a winding mistake hides, so it belongs in the shot
+			world.set_place_facing(Vector3i(0, 0, 1))
+			world.set_block(bp_x + 3, bp_y, wz, Blocks.TRAPDOOR_OPEN)
+			world.set_place_facing(Vector3i(1, 0, 0))
+			world.set_block(bp_x + 3, bp_y, wz + 1, Blocks.TRAPDOOR_OPEN)
+			world.set_place_facing(Vector3i.ZERO)
+			# a sign with text
+			world.set_place_facing(Vector3i(0, 0, 1))
+			world.set_block(bp_x - 1, bp_y + 1, wz + 1, Blocks.SIGN)
+			world.set_sign_text(Vector3i(bp_x - 1, bp_y + 1, wz + 1), "Hello")
+			world.set_place_facing(Vector3i.ZERO)
+			# a bed and an enchanting table, and the two new species in front of them
+			world.set_block(bp_x - 3, bp_y, wz + 2, Blocks.BED)
+			world.set_block(bp_x - 1, bp_y, wz + 2, Blocks.ENCHANTING_TABLE)
+			mobs.spawn_at("slime", Vector3(float(bp_x) + 2.5, float(bp_y), float(wz) + 2.5))
+			mobs.spawn_at("enderman", Vector3(float(bp_x) + 4.5, float(bp_y), float(wz) + 1.5))
+			await _settle()
+			player.pitch = -0.30
+			for i in 25:
+				await get_tree().physics_frame
+			await _shot("build.png")
+		"lava":
+			# both fluids in one frame: a lava pool, a water tongue running into it, the
+			# obsidian the meeting leaves behind, and the shallower surface of a flowing
+			# cell next to a full source
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.creative = true
+			player.flying = true
+			var lb := Vector3i(floori(player.global_position.x),
+				world.highest_occluder(floori(player.global_position.x),
+					floori(player.global_position.z)) + 2,
+				floori(player.global_position.z))
+			for dx in range(-7, 8):
+				for dz in range(-7, 8):
+					world.set_block(lb.x + dx, lb.y - 1, lb.z + dz, Blocks.STONE_BRICK)
+					if dx > 0 and dx < 5 and absi(dz) < 3:
+						world.set_block(lb.x + dx, lb.y, lb.z + dz, Blocks.LAVA)
+					elif dx >= 5 and dx < 8 and absi(dz) < 3:
+						world.set_block(lb.x + dx, lb.y, lb.z + dz, Blocks.WATER)
+			# a source spilling west, so the capture shows the level stepping down
+			world.set_block(lb.x - 6, lb.y, lb.z, Blocks.WATER)
+			for i in 60:
+				world.step_fluids(1.0)
+			await _settle()
+			player.place_at(Vector3(float(lb.x), float(lb.y) + 5.0, float(lb.z) + 0.5))
+			player.pitch = -1.15
+			player.yaw = 0.0
+			for i in 20:
+				await get_tree().physics_frame
+			await _shot("lava.png")
 		"play":
 			_on_new_world("Preview", _capture_seed, false, 5)
 			await _wait_loaded()
@@ -3583,6 +4940,10 @@ func _run_capture() -> void:
 			player.inventory[5] = {"id": Blocks.RELAY, "count": 3}
 			player.crafting[0] = {"id": Blocks.LOG, "count": 3}
 			player.crafting[4] = {"id": Blocks.PLANKS, "count": 6}
+			# worn armour, so the shot proves the four armour slots render in place
+			player.armor[0] = {"id": Blocks.ITEM_IRON_HELMET, "count": 1, "dur": 165}
+			player.armor[1] = {"id": Blocks.ITEM_DIAMOND_CHESTPLATE, "count": 1, "dur": 528}
+			player.armor[2] = {"id": Blocks.ITEM_LEATHER_LEGGINGS, "count": 1, "dur": 75}
 			player.hotbar_changed.emit()
 			_open_inventory()
 			hud.refresh_inventory()
@@ -3595,6 +4956,132 @@ func _run_capture() -> void:
 			await get_tree().process_frame
 			await get_tree().process_frame
 			await _shot("menu_inventory.png")
+		"village":
+			_on_new_world("Preview", _capture_seed, true, 6)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			var v = _find_village_near(0, 0, 800)
+			if v != null:
+				var ox: int = v["ox"]
+				var oz: int = v["oz"]
+				var plat: int = v["plat"]
+				player.creative = true
+				player.flying = true
+				player.place_at(Vector3(float(ox) + 0.5, float(plat) + 8.0, float(oz) + 0.5))
+				player.pitch = -0.42
+				player.yaw = 0.7
+				await _wait_loaded()
+				player.flying = true
+				await _settle()
+				player.place_at(Vector3(float(ox) + 0.5, float(plat) + 8.0, float(oz) + 0.5))
+				player.flying = true
+				# let the real spawner fill the village: no manual spawning here, so this
+				# shot is also the end-to-end proof that villagers turn up on their own
+				for i in 900:
+					await get_tree().physics_frame
+				print("village villagers  = ", mobs._count_of("villager"))
+				await _shot("village.png")
+		"trade":
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.creative = true
+			var vm = mobs.spawn_at("villager", world.safe_spawn_near(
+				player.global_position + Vector3(1.5, 0, -2.5)))
+			player.give(Blocks.ITEM_WHEAT, 20)
+			_on_villager_used(vm)
+			await get_tree().process_frame
+			await get_tree().process_frame
+			await _shot("trade.png")
+		"gate":
+			# a fence run with a closed gate in it and an open gate beside it, three-quarter
+			# on, so the gate's shape is unmistakable
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.creative = true
+			player.flying = true
+			var gx := floori(player.global_position.x)
+			var gy := floori(player.global_position.y)
+			var gz := floori(player.global_position.z)
+			for dx in range(-4, 7):
+				for dz in range(-7, 3):
+					world.set_block(gx + dx, gy - 1, gz + dz, Blocks.STONE)
+					for dy in range(0, 4):
+						world.set_block(gx + dx, gy + dy, gz + dz, Blocks.AIR)
+			world.set_place_facing(Vector3i(1, 0, 0))
+			for dx in range(-2, 3):
+				world.set_block(gx + dx, gy, gz - 3,
+					Blocks.FENCE if dx != 0 else Blocks.FENCE_GATE)
+			world.set_block(gx - 2, gy, gz - 1, Blocks.FENCE_GATE_OPEN)
+			world.set_place_facing(Vector3i.ZERO)
+			player.place_at(Vector3(gx + 4.5, gy + 2.5, gz + 1.5))
+			player.flying = true
+			player.yaw = 0.55
+			player.pitch = -0.28
+			for i in 25:
+				await get_tree().physics_frame
+			await _shot("gate.png")
+		"trapdoor":
+			# a closed hatch and two open ones hinged each way, seen three-quarter on: the
+			# open board is what used to vanish and let you see through it
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.creative = true
+			player.flying = true
+			var tbx := floori(player.global_position.x)
+			var tby := floori(player.global_position.y)
+			var tbz := floori(player.global_position.z)
+			for dx in range(-5, 8):
+				for dz in range(-8, 2):
+					world.set_block(tbx + dx, tby - 1, tbz + dz, Blocks.STONE)
+					for dy in range(0, 4):
+						world.set_block(tbx + dx, tby + dy, tbz + dz, Blocks.AIR)
+			world.set_place_facing(Vector3i.ZERO)
+			world.set_block(tbx - 2, tby, tbz - 5, Blocks.TRAPDOOR)
+			world.set_place_facing(Vector3i(0, 0, 1))
+			world.set_block(tbx, tby, tbz - 5, Blocks.TRAPDOOR_OPEN)
+			world.set_place_facing(Vector3i(1, 0, 0))
+			world.set_block(tbx + 2, tby, tbz - 5, Blocks.TRAPDOOR_OPEN)
+			world.set_place_facing(Vector3i.ZERO)
+			player.place_at(Vector3(float(tbx) + 4.5, float(tby) + 3.0, float(tbz) + 2.0))
+			player.flying = true
+			player.yaw = 0.72
+			player.pitch = -0.42
+			for i in 25:
+				await get_tree().physics_frame
+			await _shot("trapdoor.png")
+		"villager":
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.creative = true
+			player.yaw = 0.0
+			mobs.spawn_at("villager", world.safe_spawn_near(
+				player.global_position + Vector3(0.0, 0, -3.0)))
+			for i in 30:
+				await get_tree().physics_frame
+			await _shot("villager.png")
+		"enchant":
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.creative = true
+			player.hotbar[0] = {"id": Blocks.ITEM_DIAMOND_PICK, "count": 1,
+				"dur": Gear.max_durability(Blocks.ITEM_DIAMOND_PICK)}
+			player.hotbar_changed.emit()
+			player.select_slot(0)
+			_on_enchant_opened(Vector3i.ZERO)
+			await get_tree().process_frame
+			await get_tree().process_frame
+			await _shot("enchant.png")
 	print("capture done: ", _capture)
 	get_tree().quit()
 

@@ -65,17 +65,55 @@ const TYPES := {
 		"body_col": "3aa02a", "head_col": "4ab83a", "leg_col": "2a8018",
 		"sound": "mob_low",
 	},
+	# a slime is a bouncing green blob rather than a real quadruped: the body box is
+	# large and the legs are stubs, which is close enough at this scale
+	"slime": {
+		"shape": "quad", "hostile": true, "burn": false, "speed": 1.5,
+		"atk_dmg": 2.0, "atk_range": 1.6, "health": 16.0,
+		"body": [12, 12, 12], "head": [8, 8, 8], "leg": [4, 4, 4],
+		"body_col": "58c04a", "head_col": "6ad05a", "leg_col": "4aa83c",
+		"snout": "3a8830", "snout_size": [4, 2, 1], "sound": "mob_low",
+	},
+	# a tall, thin, near-black figure with long limbs
+	"enderman": {
+		"shape": "human", "hostile": true, "burn": false, "speed": 2.6,
+		"atk_dmg": 5.0, "atk_range": 2.0, "health": 40.0,
+		"body": [8, 14, 4], "head": [8, 8, 8], "leg": [4, 18, 4], "arms": [4, 18, 4],
+		"body_col": "12121a", "head_col": "18181f", "leg_col": "0c0c12",
+		"arm_col": "18181f", "sound": "mob_low",
+	},
+	# ---- villagers. They are *not* in mobs.gd's PASSIVE roster: the wild spawner would
+	# drop them on any patch of grass. They belong to a village, so mobs.gd spawns them
+	# against a village centre instead. A robe-brown body and a big nose are all it takes
+	# to read as a villager, and `flee: false` keeps them from running away from you.
+	"villager": {
+		"shape": "human", "hostile": false, "burn": false, "speed": 1.15, "flee": false,
+		"health": 20.0,
+		"body": [8, 12, 4], "head": [8, 8, 8], "leg": [4, 12, 4], "arms": [4, 12, 4],
+		"body_col": "6b4a2f", "head_col": "c08a5a", "leg_col": "4a3421",
+		# the arms are the robe, not bare skin: a villager's hands are tucked into the
+		# sleeves and folded across the chest, so a skin-coloured arm reads as a person
+		# with their arms hanging at their sides
+		"arm_col": "5a3a22", "sound": "mob_grunt",
+		"nose": "b07f52", "nose_size": [2, 2, 2],
+	},
 }
 
 signal died(kind: String, pos: Vector3)
 signal fired(origin: Vector3, dir: Vector3)
 signal exploded(pos: Vector3, radius: float)
+## Right-clicked (a villager is talked to). Routed out through mobs.gd so main can open
+## the trade screen; the mob itself knows nothing about trading.
+signal used(mob)
 
 var world
 var player = null
 var particles = null
 var kind := "pig"
 var def: Dictionary = {}
+## A villager's trade, chosen by its position, not by its kind: "Farmer", "Butcher",
+## "Smith" or "Mason". Blank for every other mob.
+var profession := ""
 
 var velocity := Vector3.ZERO
 var on_ground := false
@@ -105,6 +143,11 @@ var _half := 0.0
 
 func is_hostile() -> bool:
 	return bool(def.get("hostile", false))
+
+
+## A right-click landed on this mob. Villagers answer it; nothing else cares.
+func interact() -> void:
+	used.emit(self)
 
 
 func setup(w, k: String, pos: Vector3) -> void:
@@ -238,6 +281,13 @@ func _build_human() -> void:
 	_head.position = Vector3(0, (body_h + float(head[1]) * 0.5) * PX, 0)
 	torso.add_child(_head)
 	_head.add_child(_box(head, Vector3.ZERO, _col("head_col")))
+	# a villager's nose: the one box that makes an otherwise generic humanoid read as a
+	# villager rather than as a player, so it is hung just below centre and pushed out
+	# past the front face of the head
+	if def.has("nose"):
+		var ns: Array = def["nose_size"]
+		_head.add_child(_box(ns, Vector3(0, -1.0,
+			float(head[2]) * 0.5 + float(ns[2]) * 0.5), _col("nose")))
 
 
 func _aabb(p: Vector3) -> AABB:
@@ -370,12 +420,14 @@ func _tick_passive(delta: float, player_pos: Vector3) -> float:
 	if _state == 1:
 		speed = float(def.get("speed", 1.35))
 		_dir = Vector3(sin(facing), 0, cos(facing))
-		# turn away from the player so they do not pile up on you
-		var away := global_position - player_pos
-		away.y = 0.0
-		if away.length() < 3.0 and away.length() > 0.01:
-			facing = atan2(away.x, away.z)
-			_dir = away.normalized()
+		# turn away from the player so they do not pile up on you. Villagers are the
+		# exception: a shopkeeper that bolts the moment you walk up cannot be traded with.
+		if bool(def.get("flee", true)):
+			var away := global_position - player_pos
+			away.y = 0.0
+			if away.length() < 3.0 and away.length() > 0.01:
+				facing = atan2(away.x, away.z)
+				_dir = away.normalized()
 	return speed
 
 
@@ -468,6 +520,12 @@ func _animate(delta: float, walking: bool) -> void:
 		_legs[i].rotation.x = s * sign * 0.55 * (1.0 if walking else 0.15)
 	for i in _arms.size():
 		var asign := 1.0 if i == 0 else -1.0
-		_arms[i].rotation.x = s * asign * 0.5 * (1.0 if walking else 0.1) - 0.1
+		if kind == "villager":
+			# folded across the chest and tucked into the robe, the way a villager stands:
+			# no swing, because a shopkeeper does not pump their arms while pottering about
+			_arms[i].rotation.x = -1.15
+			_arms[i].rotation.z = asign * 0.35
+		else:
+			_arms[i].rotation.x = s * asign * 0.5 * (1.0 if walking else 0.1) - 0.1
 	if _head != null:
 		_head.rotation.x = sin(_phase * 0.5) * 0.06 + (0.0 if walking else sin(_phase * 0.3) * 0.02)

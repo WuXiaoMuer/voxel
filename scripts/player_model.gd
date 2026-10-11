@@ -9,6 +9,12 @@ const PIXEL := 0.055          # one skin pixel in world units (32 px ≈ 1.76 m)
 ## look-around read as "the head turned, then the shoulders followed".
 const HEAD_LIMIT := 1.31
 
+## How big a held block is in the *camera* hand, against the 0.2 it gets on the body's own
+## arm. The camera hand sits about 0.35 from the eye -- far closer than anything the body
+## arm holds in third person -- so the same world size looks enormous there, which is what
+## made the held block read as a wall in front of the face rather than a thing in a hand.
+const FP_ITEM_SCALE := 0.16
+
 ## skin, hair, shirt, pants, shoes, eye
 const SKINS := [
 	{"name": "Steve", "skin": "c99a6b", "hair": "3b2a1a", "shirt": "00aaaa",
@@ -46,6 +52,9 @@ var _skin_tex: ImageTexture
 ## eases toward the look and the head makes up the difference, so the head leads.
 var look_yaw := 0.0
 var body_yaw := 0.0
+## True while the camera rides at the eye: the surviving arm is posed forward, and the
+## parts that would be under the lens are off. See `set_first_person`.
+var first_person := false
 var pinned := false
 var pinned_yaw := 0.0
 var _facing_init := false
@@ -147,7 +156,12 @@ var held_head: MeshInstance3D
 
 ## Shows a small copy of `id` in the right hand. Pass 0 to hide it. Kept in sync by
 ## player.refresh_hand().
-func set_held_block(id: int) -> void:
+##
+## `fp` is set for the camera-mounted hand. That rig sits about 0.35 from the eye, so a
+## block scaled the same as the one on the body's arm covers a large part of the screen;
+## shrinking only the item (rather than the whole hand) is what stops the held block from
+## reading as a wall with fingers behind it.
+func set_held_block(id: int, fp: bool = false) -> void:
 	if held == null:
 		return
 	if held_tool != null:
@@ -157,11 +171,13 @@ func set_held_block(id: int) -> void:
 		held.mesh = null
 		return
 	held.mesh = Blocks.make_block_mesh(id)
-	held.scale = Vector3(0.2, 0.2, 0.2)
+	var s := FP_ITEM_SCALE if fp else 0.2
+	held.scale = Vector3(s, s, s)
 	# clear of the arm on every axis, so the block reads from behind as well as
 	# from the front instead of being swallowed by the sleeve. arm_r is the +x arm,
 	# so +x is outward.
-	held.position = Vector3(0.05, -0.72, -0.17)
+	var out := 0.05 if not fp else 0.045
+	held.position = Vector3(out, -0.72, -0.17)
 	held.visible = true
 
 
@@ -497,22 +513,55 @@ func unpin_facing() -> void:
 	_facing_init = false
 
 
-## What first person has to take off, and why it is two parts rather than one:
+## What the camera must not see in first person, versus what must still be *there*.
 ##
-##  * the **skull**, because the camera rides at the eye line (1.62 up) and the head box
-##    spans 1.32 to 1.76, so leaving it on puts the view inside its own head;
-##  * the **chest**, because its top and the tops of both arms are one flat, coplanar,
-##    same-coloured plane 0.30 below the eye and 0.88 wide. From the eye that plane
-##    subtends enough of the screen to cover the bottom third of the view as soon as you
-##    look down more than about thirty degrees -- which is most of the time you are mining
-##    or building. It does not read as a chest; it reads as a shutter over the ground.
+## The head goes because the camera rides inside it, and the right arm goes because first
+## person draws a camera-mounted hand (`player.fp_hand`) in its place. The chest, the left
+## arm and the legs stay: that is your body, and it is what you want to see when you look
+## down. The chest in particular is not negotiable -- hiding it is what took it out of the
+## view *and* out of your shadow.
 ##
-## Arms and legs stay. They are what you actually want to see when you look down, they sit
-## out at the sides and below, and being narrow they leave the ground in front of you
-## visible. The body is still drawn the whole time, so it still casts a shadow.
+## Crucially the two dropped parts are **not** turned off with `visible = false`. An
+## invisible node is skipped by the whole render pipeline, shadows included, so hiding the
+## head and arm that way silently removed them from the player's own shadow on the ground --
+## which is exactly what "you can't see it in the shadow" was. `SHADOWS_ONLY` says precisely
+## what is wanted: drawn into the shadow pass, and nowhere else.
 func set_first_person(v: bool) -> void:
-	head.visible = not v
-	torso.visible = not v
+	first_person = v
+	head.visible = true
+	torso.visible = true
+	arm_r.visible = true
+	arm_l.visible = true
+	_shadow_only(head, v)
+	_shadow_only(arm_r, v)
+	# the right arm stays drawn for its shadow, so what it carries has to be taken out of
+	# the view by hand: otherwise the held block turns up a second time, floating at your
+	# hip, next to the one the camera hand is already holding
+	_cargo_shadow_only(v)
+
+
+## A body part drawn into the shadow pass only, while `on`.
+func _shadow_only(mi: MeshInstance3D, on: bool) -> void:
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY if on \
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+
+## The held block and tool, and every mesh inside them. Same idea as `_shadow_only`, except
+## what they are put back to is NO shadow: unlike the body parts, a carried item never cast
+## one to begin with (`cast_shadow` is off on them by design).
+func _cargo_shadow_only(v: bool) -> void:
+	for n in [held, held_tool]:
+		if n != null:
+			_recursive_shadow_only(n, v)
+
+
+func _recursive_shadow_only(n: Node, on: bool) -> void:
+	if n is GeometryInstance3D:
+		(n as GeometryInstance3D).cast_shadow = \
+			GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY if on \
+			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for c in n.get_children():
+		_recursive_shadow_only(c, on)
 
 
 ## speed: horizontal speed in blocks/s. pitch: the player's look pitch.
@@ -537,6 +586,14 @@ func animate(delta: float, speed: float, grounded: bool, sneaking: bool,
 	# idle sway
 	arm_r.rotation.z = sin(_phase * 0.5) * 0.04 - 0.04
 	arm_l.rotation.z = -sin(_phase * 0.5) * 0.04 + 0.04
+
+	if first_person:
+		# Pose the surviving arm slightly forward and out. Straight down, its top is a flat
+		# horizontal plate 0.30 under the eye and the camera looks at it edge-on -- a plate,
+		# not an arm. Swung forward you see its front as well as its top, and it reaches out
+		# ahead of you, which is what makes it read as your own arm when you look down.
+		arm_l.rotation.x += 0.30
+		arm_l.rotation.z -= 0.10
 
 	# crouch: tip the chest forward about the hips and drop the shoulders a little
 	var lean := -0.32 if (sneaking and grounded) else 0.0

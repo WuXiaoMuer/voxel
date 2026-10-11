@@ -7,7 +7,7 @@ const PAD := 2            # gutter used to keep mipmaps from bleeding
 const CELL := TILE + PAD * 2
 const COLS := 8
 const ROWS := 16
-const TILES := 80
+const TILES := 101
 
 # ---------------------------------------------------------------- block ids
 const AIR := 0
@@ -75,6 +75,79 @@ const WHEAT_0 := 52            # four growth stages, each its own block id
 const WHEAT_1 := 53
 const WHEAT_2 := 54
 const WHEAT_3 := 55
+# Lava is the second fluid. It shares the water mesher path but not its material, and it
+# is a source of light and a hazard rather than something you swim in.
+const LAVA := 56
+
+# ---------------------------------------------------------------- building shapes
+# Stairs, slabs, trapdoors and carpets are not cubes, so they cannot share the cube
+# mesher. Each is a small render kind (K_SLAB/K_STAIRS/K_TRAPDOOR/K_CARPET) plus a
+# facing record: which half a slab sits in, which way a stair ascends, which edge a
+# trapdoor is hinged on. A craftable house needs these before it can look like one.
+const SLAB := 57
+const SLAB_WOOD := 58
+const SLAB_COBBLE := 59
+const STAIRS := 60
+const STAIRS_WOOD := 61
+const STAIRS_COBBLE := 62
+# A trapdoor is two ids, the way a door is: the id carries the open/closed state and
+# therefore the collision and the persistence all at once.
+const TRAPDOOR := 63
+const TRAPDOOR_OPEN := 64
+const FENCE_GATE := 65
+const FENCE_GATE_OPEN := 66
+# A sign is a thin panel (K_PANEL) so the mesher already knows how to draw it; only the
+# editable text on it is new state (world.sign_text).
+const SIGN := 67                 # standing: a board on a post
+const SIGN_WALL := 68            # hung flat against a wall
+# Wool and carpet come in the sixteen dye colours. Two ids each, so a wall built out of
+# them is exactly as expressive as Minecraft's. The ids are written out one by one rather
+# than computed, because the crafting table indexes them by name.
+const WOOL_0 := 69
+const WOOL_1 := 70
+const WOOL_2 := 71
+const WOOL_3 := 72
+const WOOL_4 := 73
+const WOOL_5 := 74
+const WOOL_6 := 75
+const WOOL_7 := 76
+const WOOL_8 := 77
+const WOOL_9 := 78
+const WOOL_10 := 79
+const WOOL_11 := 80
+const WOOL_12 := 81
+const WOOL_13 := 82
+const WOOL_14 := 83
+const WOOL_15 := 84
+const CARPET_0 := 85
+const CARPET_1 := 86
+const CARPET_2 := 87
+const CARPET_3 := 88
+const CARPET_4 := 89
+const CARPET_5 := 90
+const CARPET_6 := 91
+const CARPET_7 := 92
+const CARPET_8 := 93
+const CARPET_9 := 94
+const CARPET_10 := 95
+const CARPET_11 := 96
+const CARPET_12 := 97
+const CARPET_13 := 98
+const CARPET_14 := 99
+const CARPET_15 := 100
+# A bed is one block rather than Minecraft's two: the slab-shaped box carries the
+# blanket, and right-clicking it at night skips to morning and sets where you respawn.
+const BED := 101
+const ENCHANTING_TABLE := 102
+## The second wood species. Kept next to the bed and enchanting table rather than beside
+## oak, so no existing block id shifts under a saved world.
+const BIRCH_LOG := 103
+const BIRCH_LEAVES := 104
+const BIRCH_PLANKS := 105
+## The far half of a bed. A bed is two cells, the way Minecraft's is: one id for the foot
+## and one for the head, because the head is the end the pillow sits at and that is not
+## derivable from the foot's id.
+const BED_HEAD := 106
 
 # ---------------------------------------------------------------- item ids
 const ITEM_STICK := 256
@@ -136,6 +209,37 @@ const ITEM_BEEF_RAW := 308
 const ITEM_BEEF_COOKED := 309
 const ITEM_CHICKEN_RAW := 310
 const ITEM_CHICKEN_COOKED := 311
+# ---------------------------------------------------------------- buckets
+const ITEM_BUCKET := 312
+const ITEM_WATER_BUCKET := 313
+const ITEM_LAVA_BUCKET := 314
+# ---------------------------------------------------------------- dyes
+# One per wool colour, in the same order as WOOL_0..WOOL_15, so `ITEM_DYE_0 + i` and
+# `WOOL_0 + i` are always the same colour.
+const ITEM_DYE_0 := 315
+const ITEM_DYE_1 := 316
+const ITEM_DYE_2 := 317
+const ITEM_DYE_3 := 318
+const ITEM_DYE_4 := 319
+const ITEM_DYE_5 := 320
+const ITEM_DYE_6 := 321
+const ITEM_DYE_7 := 322
+const ITEM_DYE_8 := 323
+const ITEM_DYE_9 := 324
+const ITEM_DYE_10 := 325
+const ITEM_DYE_11 := 326
+const ITEM_DYE_12 := 327
+const ITEM_DYE_13 := 328
+const ITEM_DYE_14 := 329
+const ITEM_DYE_15 := 330
+# ---------------------------------------------------------------- mob loot (later species)
+const ITEM_SLIME_BALL := 331
+const ITEM_ENDER_PEARL := 332
+# ---------------------------------------------------------------- currency
+# The emerald is the villager's coin. Unlike Minecraft there is no emerald ore: the
+# only way to get one is to trade with a villager, which is the whole point of the
+# trade screen -- it is a sink for wheat, coal and stone, and the source of emeralds.
+const ITEM_EMERALD := 333
 
 # ---------------------------------------------------------------- tile ids
 const T_GRASS_TOP := 0
@@ -211,6 +315,44 @@ const T_WHEAT_0 := 68
 const T_WHEAT_1 := 69
 const T_WHEAT_2 := 70
 const T_WHEAT_3 := 71
+const T_LAVA := 72
+# ---------------------------------------------------------------- building shapes
+const T_TRAPDOOR := 73
+const T_GATE := 74
+const T_GATE_OPEN := 75
+const T_SIGN := 76
+# 16 wool tiles, shared by the wool block and its carpet: one per dye colour.
+const T_WOOL_0 := 77
+const T_WOOL_15 := 92
+const T_BED := 93
+const T_ENCHANT := 94
+# ---------------------------------------------------------------- birch (a second
+# wood species, so a birch forest is recognisable from inside it and not just from the
+# biome readout)
+const T_BIRCH_LOG_SIDE := 95
+const T_BIRCH_LOG_TOP := 96
+const T_BIRCH_LEAVES := 97
+const T_BIRCH_PLANKS := 98
+# A bed is built from three real pieces (frame, mattress, pillow) rather than one box,
+# so it needs a side and a pillow tile of its own: the top tile alone would wrap the
+# pillow round the sides of the mattress.
+const T_BED_SIDE := 99
+const T_BED_PILLOW := 100
+
+# The sixteen dye colours, in Minecraft's order. `WOOL_NAMES[i]` names `WOOL_0 + i`,
+# `ITEM_DYE_0 + i`, `CARPET_0 + i` and `T_WOOL_0 + i` alike; `WOOL_COLORS[i]` is the
+# colour every one of those is drawn in.
+const WOOL_NAMES := ["White", "Orange", "Magenta", "Light Blue", "Yellow", "Lime",
+	"Pink", "Gray", "Light Gray", "Cyan", "Purple", "Blue", "Brown", "Green", "Red",
+	"Black"]
+const WOOL_COLORS := [
+	Color(0.93, 0.93, 0.93), Color(0.94, 0.56, 0.16), Color(0.76, 0.30, 0.76),
+	Color(0.36, 0.60, 0.92), Color(0.92, 0.82, 0.20), Color(0.42, 0.82, 0.16),
+	Color(0.95, 0.55, 0.65), Color(0.35, 0.35, 0.38), Color(0.62, 0.62, 0.64),
+	Color(0.20, 0.62, 0.62), Color(0.50, 0.20, 0.72), Color(0.20, 0.24, 0.72),
+	Color(0.50, 0.32, 0.16), Color(0.26, 0.44, 0.14), Color(0.72, 0.18, 0.16),
+	Color(0.12, 0.12, 0.14),
+]
 
 # kind: 0 = normal cube, 1 = alpha-cutout cube (leaves), 2 = translucent (water/glass/ice),
 #       3 = crossed billboard (plants / torch), 4 = flat plate on the floor (dust, plate)
@@ -220,6 +362,18 @@ const K_TRANSLUCENT := 2
 const K_CROSS := 3
 const K_FLAT := 4
 const K_PANEL := 5     # a thin upright panel: a door leaf or a ladder
+# The non-cube building shapes. K_SLAB is a half-height box, K_STAIRS a half box plus a
+# quarter, K_TRAPDOOR a thin horizontal or upright hatch, K_CARPET a 1/16 slab.
+const K_SLAB := 6
+const K_STAIRS := 7
+const K_TRAPDOOR := 8
+const K_CARPET := 9
+## A fence is a centre post with rails; a gate is a thin panel across the fence line. Both
+## used to be a K_CUTOUT cube wearing the fence silhouette, which drew a run of fences as a
+## jumble of intersecting panels and gave a gate no shape at all.
+const K_FENCE := 11
+const K_GATE := 12
+const K_BED := 10      # a slab-shaped block with a blanket and pillow: a bed
 
 var defs: Array = []                 # id -> definition dictionary
 var names: PackedStringArray = []
@@ -242,6 +396,7 @@ var mat_opaque: StandardMaterial3D
 var mat_cutout: StandardMaterial3D
 var mat_water: StandardMaterial3D
 var mat_cross: StandardMaterial3D
+var mat_lava: StandardMaterial3D
 
 
 func _ready() -> void:
@@ -288,6 +443,10 @@ func _build_defs() -> void:
 	_def(PLANKS, "Oak Planks", T_PLANKS, K_CUBE, 2.0, PLANKS)
 	_def(LOG, "Oak Log", [T_LOG_TOP, T_LOG_TOP, T_LOG_SIDE], K_CUBE, 2.0, LOG)
 	_def(LEAVES, "Oak Leaves", T_LEAVES, K_CUTOUT, 0.2, LEAVES)
+	_def(BIRCH_LOG, "Birch Log", [T_BIRCH_LOG_TOP, T_BIRCH_LOG_TOP, T_BIRCH_LOG_SIDE],
+		K_CUBE, 2.0, BIRCH_LOG)
+	_def(BIRCH_LEAVES, "Birch Leaves", T_BIRCH_LEAVES, K_CUTOUT, 0.2, BIRCH_LEAVES)
+	_def(BIRCH_PLANKS, "Birch Planks", T_BIRCH_PLANKS, K_CUBE, 2.0, BIRCH_PLANKS)
 	_def(SAND, "Sand", T_SAND, K_CUBE, 0.5, SAND)
 	_def(GLASS, "Glass", T_GLASS, K_TRANSLUCENT, 0.3, GLASS)
 	_def(WATER, "Water", T_WATER, K_TRANSLUCENT, 100.0, -1)
@@ -315,7 +474,7 @@ func _build_defs() -> void:
 	_def(IRON_BLOCK, "Block of Iron", T_IRON_BLOCK, K_CUBE, 4.0, IRON_BLOCK)
 	_def(GOLD_BLOCK, "Block of Gold", T_GOLD_BLOCK, K_CUBE, 3.0, GOLD_BLOCK)
 	_def(DIAMOND_BLOCK, "Block of Diamond", T_DIAMOND_BLOCK, K_CUBE, 4.0, DIAMOND_BLOCK)
-	_def(FENCE, "Oak Fence", T_FENCE, K_CUTOUT, 1.5, FENCE)
+	_def(FENCE, "Oak Fence", T_PLANKS, K_FENCE, 1.5, FENCE)
 	_def(LADDER, "Ladder", T_LADDER, K_PANEL, 0.4, LADDER)
 	_def(GLASS_PANE, "Glass Pane", T_PANE, K_TRANSLUCENT, 0.3, GLASS_PANE)
 	# A door and a ladder are thin upright panels, not cubes and not crossed billboards:
@@ -354,6 +513,31 @@ func _build_defs() -> void:
 	_def(WHEAT_1, "Wheat Crop", T_WHEAT_1, K_CROSS, 0.05, -1)
 	_def(WHEAT_2, "Wheat Crop", T_WHEAT_2, K_CROSS, 0.05, -1)
 	_def(WHEAT_3, "Wheat", T_WHEAT_3, K_CROSS, 0.05, ITEM_WHEAT)
+	# Lava renders through the fluid path like water (variable height, no occlusion), but
+	# with its own bright, opaque material and emission 15 so it lights the cave it is in.
+	_def(LAVA, "Lava", T_LAVA, K_TRANSLUCENT, 100.0, -1, 15)
+
+	# ---- building shapes. The slab and stair tiles are the plain full-block tiles
+	# (stone, planks, cobble), so the top face of a half-height box still shows the
+	# right texture rather than a squashed side.
+	_def(SLAB, "Stone Slab", T_STONE, K_SLAB, 2.0, SLAB)
+	_def(SLAB_WOOD, "Oak Slab", T_PLANKS, K_SLAB, 2.0, SLAB_WOOD)
+	_def(SLAB_COBBLE, "Cobblestone Slab", T_COBBLE, K_SLAB, 2.0, SLAB_COBBLE)
+	_def(STAIRS, "Stone Stairs", T_STONE, K_STAIRS, 2.0, STAIRS)
+	_def(STAIRS_WOOD, "Oak Stairs", T_PLANKS, K_STAIRS, 2.0, STAIRS_WOOD)
+	_def(STAIRS_COBBLE, "Cobblestone Stairs", T_COBBLE, K_STAIRS, 2.0, STAIRS_COBBLE)
+	_def(TRAPDOOR, "Oak Trapdoor", T_TRAPDOOR, K_TRAPDOOR, 2.0, TRAPDOOR)
+	_def(TRAPDOOR_OPEN, "Oak Trapdoor", T_TRAPDOOR, K_TRAPDOOR, 2.0, TRAPDOOR)
+	_def(FENCE_GATE, "Oak Fence Gate", T_GATE, K_GATE, 2.0, FENCE_GATE)
+	_def(FENCE_GATE_OPEN, "Oak Fence Gate", T_GATE_OPEN, K_GATE, 2.0, FENCE_GATE)
+	_def(SIGN, "Sign", T_SIGN, K_PANEL, 1.0, SIGN)
+	_def(SIGN_WALL, "Sign", T_SIGN, K_PANEL, 1.0, SIGN)
+	for i in 16:
+		_def(WOOL_0 + i, "%s Wool" % WOOL_NAMES[i], T_WOOL_0 + i, K_CUBE, 0.8, WOOL_0 + i)
+		_def(CARPET_0 + i, "%s Carpet" % WOOL_NAMES[i], T_WOOL_0 + i, K_CARPET, 0.1, CARPET_0 + i)
+	_def(BED, "Bed", T_BED, K_BED, 0.2, BED)
+	_def(BED_HEAD, "Bed", T_BED, K_BED, 0.2, BED)
+	_def(ENCHANTING_TABLE, "Enchanting Table", [T_ENCHANT, T_OBSIDIAN, T_ENCHANT], K_CUBE, 3.5, ENCHANTING_TABLE)
 
 	# non-block items share the same id space so an inventory slot is just an int
 	names[ITEM_STICK] = "Stick"
@@ -415,6 +599,16 @@ func _build_defs() -> void:
 	names[ITEM_BEEF_COOKED] = "Steak"
 	names[ITEM_CHICKEN_RAW] = "Raw Chicken"
 	names[ITEM_CHICKEN_COOKED] = "Cooked Chicken"
+	# buckets
+	names[ITEM_BUCKET] = "Bucket"
+	names[ITEM_WATER_BUCKET] = "Water Bucket"
+	names[ITEM_LAVA_BUCKET] = "Lava Bucket"
+	# dyes
+	for i in 16:
+		names[ITEM_DYE_0 + i] = "%s Dye" % WOOL_NAMES[i]
+	names[ITEM_SLIME_BALL] = "Slimeball"
+	names[ITEM_ENDER_PEARL] = "Ender Pearl"
+	names[ITEM_EMERALD] = "Emerald"
 
 	for id in range(0, 512):
 		var d = defs[id]
@@ -451,11 +645,31 @@ func _build_defs() -> void:
 				# not block movement, and they must not occlude either or they would
 				# cut a hole in the face of the block they sit on
 				pass
+			K_SLAB, K_STAIRS, K_TRAPDOOR:
+				# Not full cubes, so they block movement but never occlude a neighbour:
+				# hiding the face behind a half-height slab would punch a hole in it.
+				# The exact collision height (half a cell, a quarter, a thin hatch) is
+				# resolved per cell by `world.collide_span`, from the block's facing.
+				solid[id] = 1
+			K_CARPET:
+				# a 1/16 slab is walked over, not into: the block underneath holds you up
+				pass
+			K_BED:
+				# a bed is a low obstacle you climb onto; it never occludes a neighbour
+				solid[id] = 1
 		if id == WATER:
 			liquid[id] = 1
+	# lava is the other fluid: you sink into it and it never blocks movement, but unlike
+	# water it is opaque and does not occlude, so faces behind it are still drawn
+	solid[LAVA] = 0
+	occluder[LAVA] = 0
+	liquid[LAVA] = 1
 	# a few blocks override the kind default
 	# a fence is a solid obstacle even though it is drawn as a cutout post
 	solid[FENCE] = 1
+	# a closed gate blocks movement (an open one is set to 0 above); it is its own shape
+	# now, so the kind cannot carry the solidity for it
+	solid[FENCE_GATE] = 1
 	# a ladder is climbable, which means you can walk *into* its cell
 	solid[LADDER] = 0
 	# glass panes and doors are solid to walk into, but see-through
@@ -465,6 +679,14 @@ func _build_defs() -> void:
 	# an open door is walked straight through
 	solid[DOOR_OPEN] = 0
 	occluder[DOOR_OPEN] = 0
+	# an open trapdoor is the upright hatch: a thin board on one side, so the cell is still
+	# walkable rather than a full wall
+	solid[TRAPDOOR_OPEN] = 0
+	# an open gate is the two swung-back posts, which you walk between
+	solid[FENCE_GATE_OPEN] = 0
+	# signs are thin boards: never an obstacle
+	solid[SIGN] = 0
+	solid[SIGN_WALL] = 0
 	# air must never occlude and never block movement
 	solid[AIR] = 0
 	occluder[AIR] = 0
@@ -473,6 +695,31 @@ func _build_defs() -> void:
 
 func is_block_item(id: int) -> bool:
 	return id > 0 and id < 256 and defs[id] != null
+
+
+## True when a block keeps a facing record in `world.facing_override`: the thin panels
+## plus every non-cube shape, whose halves and hinges are not derivable from the id. A bed
+## is in the list because the pillow sits at one *end*, and which end is not in the id.
+func uses_facing(k: int) -> bool:
+	return k == K_PANEL or k == K_SLAB or k == K_STAIRS or k == K_TRAPDOOR \
+		or k == K_BED or k == K_GATE
+
+
+## The dye index 0..15 of a wool, carpet or dye id, or -1 for anything else. WOOL_0 + i,
+## CARPET_0 + i and ITEM_DYE_0 + i are the same colour by construction.
+func wool_index(id: int) -> int:
+	if id >= WOOL_0 and id <= WOOL_15:
+		return id - WOOL_0
+	if id >= CARPET_0 and id <= CARPET_15:
+		return id - CARPET_0
+	if id >= ITEM_DYE_0 and id <= ITEM_DYE_15:
+		return id - ITEM_DYE_0
+	return -1
+
+
+func wool_colour(id: int) -> Color:
+	var i := wool_index(id)
+	return WOOL_COLORS[i] if i >= 0 else Color(0.80, 0.80, 0.80)
 
 
 ## Circuit role, so the solver and the mesher agree on what a block is:
@@ -629,19 +876,34 @@ func _tile_image(id: int) -> Image:
 	var img := Image.create(TILE, TILE, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
 	var r := _rng(1000 + id)
+	if id >= T_WOOL_0 and id <= T_WOOL_15:
+		_wool_tile(img, id - T_WOOL_0, r)
+		return img
 	match id:
+		T_LAVA:
+			# molten rock: a hot orange base under darker crust patches and a few bright
+			# cracks, so a shallow flowing tongue still reads as lava rather than paint
+			_flat(img, Color(0.90, 0.33, 0.05), 0.10, 73)
+			for i in 9:
+				_blob(img, r.randi_range(1, 14), r.randi_range(1, 14), r.randi_range(1, 2),
+					Color(0.56, 0.14, 0.02))
+			for i in 8:
+				_blob(img, r.randi_range(1, 14), r.randi_range(1, 14), 1,
+					Color(1.0, 0.74, 0.24))
 		T_GRASS_TOP:
-			_flat(img, Color(0.36, 0.62, 0.24), 0.13, 11)
-			for i in 26:
-				var x := r.randi_range(0, TILE - 1)
-				var y := r.randi_range(0, TILE - 1)
-				img.set_pixel(x, y, Color(0.30, 0.54, 0.20))
+			# Minecraft's grass top is a quiet green that varies in soft clumps, not a
+			# per-pixel snowstorm: heavy single-pixel noise reads as static on a 16x16
+			# texture magnified to a block. So the base wobble is small and the variation
+			# that is left comes in little 5-pixel blobs.
+			_flat(img, Color(0.38, 0.60, 0.25), 0.05, 11)
 			for i in 14:
-				var x2 := r.randi_range(0, TILE - 1)
-				var y2 := r.randi_range(0, TILE - 1)
-				img.set_pixel(x2, y2, Color(0.44, 0.70, 0.28))
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.32, 0.52, 0.21))
+			for i in 8:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.45, 0.68, 0.29))
 		T_GRASS_SIDE:
-			_flat(img, Color(0.42, 0.30, 0.19), 0.14, 12)
+			_flat(img, Color(0.42, 0.30, 0.19), 0.09, 12)
 			for x in TILE:
 				var d := 3 + r.randi_range(0, 2)
 				for y in d:
@@ -650,9 +912,13 @@ func _tile_image(id: int) -> Image:
 				if d < TILE:
 					img.set_pixel(x, d, Color(0.30, 0.52, 0.20))
 		T_DIRT:
-			_flat(img, Color(0.42, 0.30, 0.19), 0.16, 13)
-			for i in 20:
-				img.set_pixel(r.randi_range(0, 15), r.randi_range(0, 15), Color(0.35, 0.25, 0.15))
+			_flat(img, Color(0.42, 0.30, 0.19), 0.09, 13)
+			for i in 10:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.35, 0.25, 0.15))
+			for i in 6:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.50, 0.36, 0.23))
 		T_STONE:
 			_flat(img, Color(0.50, 0.50, 0.50), 0.10, 14)
 			for i in 8:
@@ -702,13 +968,19 @@ func _tile_image(id: int) -> Image:
 						img.set_pixel(x, y, col)
 			_blob(img, 8, 8, 1, Color(0.52, 0.38, 0.22))
 		T_LEAVES:
-			_flat(img, Color(0.28, 0.50, 0.18), 0.22, 21)
-			for i in 34:
-				img.set_pixel(r.randi_range(0, 15), r.randi_range(0, 15), Color(0.20, 0.38, 0.13))
-			for i in 3:
-				var x := r.randi_range(0, 15)
-				var y := r.randi_range(0, 15)
-				img.set_pixel(x, y, Color(0, 0, 0, 0))
+			# clumps, not confetti: oak leaves in Minecraft are broad patches of light and
+			# shade with only a few holes through them, which is what tells you a canopy is
+			# made of leaves rather than of coloured static
+			_flat(img, Color(0.30, 0.52, 0.20), 0.09, 21)
+			for i in 16:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.23, 0.42, 0.15))
+			for i in 10:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.36, 0.60, 0.24))
+			for i in 4:
+				img.set_pixel(r.randi_range(1, TILE - 2), r.randi_range(1, TILE - 2),
+					Color(0, 0, 0, 0))
 		T_PLANKS:
 			_flat(img, Color(0.62, 0.46, 0.26), 0.07, 22)
 			for y in TILE:
@@ -751,8 +1023,8 @@ func _tile_image(id: int) -> Image:
 		T_DIAMOND:
 			img = _ore(T_STONE, Color(0.35, 0.92, 0.92), 29)
 		T_GRAVEL:
-			_flat(img, Color(0.47, 0.44, 0.42), 0.20, 30)
-			for i in 40:
+			_flat(img, Color(0.47, 0.44, 0.42), 0.13, 30)
+			for i in 22:
 				var v := r.randf_range(0.30, 0.62)
 				_blob(img, r.randi_range(0, 15), r.randi_range(0, 15), 1, Color(v, v * 0.95, v * 0.9))
 		T_BRICK:
@@ -817,6 +1089,56 @@ func _tile_image(id: int) -> Image:
 				img.set_pixel(15, y, Color(0.18, 0.40, 0.18))
 			for i in 12:
 				img.set_pixel(r.randi_range(1, 14), r.randi_range(0, 15), Color(0.82, 0.84, 0.72))
+		T_BIRCH_LOG_SIDE:
+			# pale bark with the short dark dashes that make birch read as birch. The
+			# dashes are horizontal marks, not the vertical grain an oak trunk has.
+			_flat(img, Color(0.86, 0.86, 0.80), 0.04, 41)
+			for i in 7:
+				var by := r.randi_range(0, TILE - 1)
+				var bx := r.randi_range(0, 8)
+				var bw := r.randi_range(2, 5)
+				for x in range(bx, bx + bw):
+					if x < TILE:
+						img.set_pixel(x, by, Color(0.30, 0.28, 0.25))
+		T_BIRCH_LOG_TOP:
+			# end grain: pale rings, the same idea as the oak top but in birch's colour
+			_flat(img, Color(0.80, 0.78, 0.68), 0.05, 42)
+			for rr in [7, 5, 3, 1]:
+				var bcol := Color(0.62, 0.58, 0.47)
+				for a in 64:
+					var ang := TAU * a / 64.0
+					var x := int(7.5 + cos(ang) * rr)
+					var y := int(7.5 + sin(ang) * rr)
+					if x >= 0 and y >= 0 and x < TILE and y < TILE:
+						img.set_pixel(x, y, bcol)
+			_blob(img, 8, 8, 1, Color(0.70, 0.66, 0.54))
+		T_BIRCH_LEAVES:
+			# a lighter, yellower green than oak, so the two canopies tell apart at a
+			# glance rather than only by the bark
+			_flat(img, Color(0.44, 0.62, 0.28), 0.09, 43)
+			for i in 16:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.35, 0.53, 0.22))
+			for i in 10:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.53, 0.72, 0.33))
+			for i in 4:
+				img.set_pixel(r.randi_range(1, TILE - 2), r.randi_range(1, TILE - 2),
+					Color(0, 0, 0, 0))
+		T_BIRCH_PLANKS:
+			# the same plank pattern as oak, in birch's paler wood
+			_flat(img, Color(0.76, 0.70, 0.52), 0.06, 44)
+			for y in TILE:
+				if y % 4 == 3:
+					for x in TILE:
+						img.set_pixel(x, y, Color(0.60, 0.54, 0.38))
+			for i in 22:
+				var x2 := r.randi_range(0, 15)
+				img.set_pixel(x2, r.randi_range(0, 15), Color(0.70, 0.64, 0.47))
+			for y2 in TILE:
+				var px := (y2 / 4) * 5 + 2
+				if px < TILE:
+					img.set_pixel(px, y2, Color(0.63, 0.57, 0.40))
 		T_CACTUS_TOP:
 			_flat(img, Color(0.28, 0.56, 0.26), 0.08, 37)
 			for i in TILE:
@@ -1138,7 +1460,127 @@ func _tile_image(id: int) -> Image:
 			img = _wheat_tile(2, 62)
 		T_WHEAT_3:
 			img = _wheat_tile(3, 63)
+		# ---- building shapes
+		T_TRAPDOOR:
+			# a slatted wooden hatch: three boards with dark gaps between them
+			_flat(img, Color(0.60, 0.44, 0.23), 0.05, 74)
+			for y in range(3, 13):
+				if y % 3 == 0:
+					for x in TILE:
+						img.set_pixel(x, y, Color(0.34, 0.24, 0.12))
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.38, 0.27, 0.13))
+				img.set_pixel(i, TILE - 1, Color(0.38, 0.27, 0.13))
+			for yy in range(3, 13):
+				for x in range(2, 14):
+					if yy % 3 == 2:
+						img.set_pixel(x, yy, Color(0.46, 0.33, 0.17))
+			# a small iron hinge and latch, so it reads as a hatch
+			for yy in range(5, 8):
+				img.set_pixel(2, yy, Color(0.52, 0.52, 0.54))
+				img.set_pixel(13, yy, Color(0.52, 0.52, 0.54))
+		T_GATE:
+			# a closed gate: two posts with two horizontal rails, like the fence
+			for y in TILE:
+				img.set_pixel(2, y, Color(0.48, 0.34, 0.17))
+				img.set_pixel(3, y, Color(0.40, 0.28, 0.14))
+				img.set_pixel(12, y, Color(0.48, 0.34, 0.17))
+				img.set_pixel(13, y, Color(0.40, 0.28, 0.14))
+			for y in [4, 9, 11]:
+				for x in range(2, 14):
+					img.set_pixel(x, y, Color(0.56, 0.40, 0.21))
+					img.set_pixel(x, y + 1, Color(0.44, 0.31, 0.16))
+		T_GATE_OPEN:
+			# open: the posts have swung to the sides, leaving the middle clear
+			for y in TILE:
+				img.set_pixel(0, y, Color(0.48, 0.34, 0.17))
+				img.set_pixel(1, y, Color(0.40, 0.28, 0.14))
+				img.set_pixel(14, y, Color(0.48, 0.34, 0.17))
+				img.set_pixel(15, y, Color(0.40, 0.28, 0.14))
+			for y in [5, 10]:
+				for x in [0, 1, 14, 15]:
+					img.set_pixel(x, y, Color(0.56, 0.40, 0.21))
+		T_SIGN:
+			# a plank board with a lighter frame: the text is drawn over it at runtime
+			_flat(img, Color(0.64, 0.48, 0.26), 0.05, 75)
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.44, 0.31, 0.15))
+				img.set_pixel(i, TILE - 1, Color(0.44, 0.31, 0.15))
+				img.set_pixel(i, 1, Color(0.54, 0.39, 0.20))
+				img.set_pixel(i, TILE - 2, Color(0.54, 0.39, 0.20))
+			for i in TILE:
+				img.set_pixel(0, i, Color(0.44, 0.31, 0.15))
+				img.set_pixel(TILE - 1, i, Color(0.44, 0.31, 0.15))
+			for y in range(4, 12):
+				for x in range(3, 13):
+					if (x + y) % 3 == 0:
+						img.set_pixel(x, y, Color(0.58, 0.43, 0.23))
+		T_BED:
+			# The blanket, seen from above. The pillow is *not* painted in here any more:
+			# it is a real box sitting on the mattress, and a pillow baked into the top
+			# tile only ended up smeared round the sides of a plain cube.
+			_flat(img, Color(0.70, 0.16, 0.16), 0.05, 76)
+			# a woven diagonal, so the blanket is cloth rather than flat paint
+			for i in 40:
+				var wx := r.randi_range(0, TILE - 1)
+				var wy := r.randi_range(0, TILE - 1)
+				img.set_pixel(wx, wy, Color(0.62, 0.13, 0.13))
+			for i in 18:
+				var wx2 := r.randi_range(0, TILE - 1)
+				var wy2 := r.randi_range(0, TILE - 1)
+				img.set_pixel(wx2, wy2, Color(0.78, 0.22, 0.21))
+			# the rolled edge of the blanket, down the two long sides
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.86, 0.84, 0.80))
+				img.set_pixel(i, TILE - 1, Color(0.86, 0.84, 0.80))
+		T_BED_SIDE:
+			# the mattress from the side: blanket red above, pale ticking below
+			_flat(img, Color(0.88, 0.86, 0.82), 0.04, 78)
+			for y in range(0, 7):
+				for x in TILE:
+					img.set_pixel(x, y, Color(0.66, 0.15, 0.15))
+			for x in TILE:
+				if x % 4 == 0:
+					for y in range(7, TILE):
+						img.set_pixel(x, y, Color(0.80, 0.78, 0.74))
+		T_BED_PILLOW:
+			_flat(img, Color(0.92, 0.92, 0.90), 0.03, 79)
+			for x in [0, TILE - 1]:
+				for y in TILE:
+					img.set_pixel(x, y, Color(0.78, 0.78, 0.76))
+			for y in [0, TILE - 1]:
+				for x in TILE:
+					img.set_pixel(x, y, Color(0.78, 0.78, 0.76))
+		T_ENCHANT:
+			# dark obsidian cloth with a ring of violet runes, like the table's book
+			_flat(img, Color(0.20, 0.10, 0.28), 0.10, 77)
+			for i in 14:
+				var a := float(i) / 14.0 * TAU
+				var x := 8 + int(cos(a) * 5.0)
+				var y := 8 + int(sin(a) * 5.0)
+				img.set_pixel(clampi(x, 0, 15), clampi(y, 0, 15), Color(0.64, 0.32, 0.86))
+			_blob(img, 8, 8, 2, Color(0.46, 0.20, 0.64))
+			img.set_pixel(8, 8, Color(0.92, 0.82, 1.0))
 	return img
+
+
+## One wool/carpet tile: the dye colour with the faint fibre noise a woven surface has,
+## so a wall of wool reads as cloth rather than flat paint.
+func _wool_tile(img: Image, index: int, r: RandomNumberGenerator) -> void:
+	var base: Color = WOOL_COLORS[clampi(index, 0, 15)]
+	_flat(img, base, 0.06, 200 + index)
+	for i in 26:
+		var x := r.randi_range(0, TILE - 1)
+		var y := r.randi_range(0, TILE - 1)
+		var f := 1.0 + r.randf_range(-0.12, 0.12)
+		img.set_pixel(x, y, Color(clampf(base.r * f, 0, 1), clampf(base.g * f, 0, 1),
+			clampf(base.b * f, 0, 1)))
+	# a couple of darker cross-stitches, like a woven blanket
+	for i in 4:
+		var sx := r.randi_range(2, TILE - 3)
+		var sy := r.randi_range(2, TILE - 3)
+		img.set_pixel(sx, sy, base.darkened(0.18))
+		img.set_pixel(sx + 1, sy, base.darkened(0.18))
 
 
 ## One wheat plant at a given growth stage, drawn as a crossed billboard: the stalks
@@ -1333,6 +1775,14 @@ func _build_materials() -> void:
 	mat_cross.alpha_scissor_threshold = 0.5
 	mat_cross.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mat_cross.roughness = 0.9
+
+	# lava: opaque, unlike water, so it gets its own material and its own vertex buffer.
+	# Culling stays off because standing in lava puts the camera inside the cell, and a
+	# back-face-culled interior would let you see the whole cave through it.
+	mat_lava = _base_material()
+	mat_lava.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	mat_lava.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat_lava.roughness = 0.75
 
 
 func _base_material() -> StandardMaterial3D:

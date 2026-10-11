@@ -30,12 +30,64 @@ const INVULN := 0.5
 const DOUBLE_TAP := 0.32
 const CLIMB := 3.2
 
+## Where the first-person hand sits, in camera space. Minecraft does not show the body's own
+## arm in first person: it draws a hand on the camera, near the bottom right, with the arm
+## receding up and forward. A real arm hanging from the shoulder sits 0.66 below the eye, so
+## it is never in shot -- posing it forward only fills the screen with a beam. These place a
+## camera-mounted arm the way Minecraft does. `SHOULDER` is where the arm's pivot should end
+## up; the rig root is derived from it in _ready, because the model's own root is at the feet.
+const FP_HAND_SHOULDER := Vector3(0.45, -0.60, -0.35)
+const FP_HAND_ROT := Vector3(2.415, 0.705, 0.0)
+## The hand's size. It is a compromise between two complaints: at 0.81 a held block covered a
+## fifth of the screen, at 0.72 the whole hand read as too small to be a hand at all. This
+## sits between them, and `SHOULDER` above is raised from the old -0.75 so the hand sits
+## higher in the corner instead of hanging off the bottom edge.
+const FP_HAND_SCALE := 0.84
+const FP_ARM_LOCAL := Vector3(0.33, 1.32, 0.0)
+
+## A torch in the hand lights the world, the way a "dynamic lights" mod does in
+## Minecraft -- and the way you would expect carrying a torch to work. One held light per
+## camera mode, because the first-person hand is a viewmodel on the camera and the body's
+## arm is out in the world.
+const HELD_LIGHT := {
+	"color": Color(1.0, 0.80, 0.52),
+	"range": 13.0,
+	"energy": 3.2,
+	"offset": Vector3(0.0, -0.35, -0.15),
+}
+
+## How far in front of the body's centre the first-person camera sits, in blocks.
+##
+## This is what stops the chest from getting in the way. Seen from directly above, its flat
+## top is a lid across the lower view; seen from in front of it, it is a chest, and -- more
+## usefully -- the line of sight down to the legs and feet then passes *in front* of the
+## chest instead of through it, so the chest stops hiding them.
+##
+## It cannot simply be pushed further without a decision being made, and this value is past
+## that line. The body is only 0.22 deep, so from about 0.20 on, the chest is out of frame
+## when you look down -- and looking down is the only time you would see it. That is
+## accepted here on purpose: Minecraft draws no first-person body at all, so an eye pushed
+## out to where the face is, with the chest gone, is *closer* to Minecraft than a centred
+## eye that keeps a slab of shirt in the corner. Legs and feet still come into view when you
+## look steeply down, because they sit a full 1.5 below the eye.
+##
+## It is also well inside the player's own 0.3 half-width, so the camera can never end up
+## inside a wall the player is not already inside -- and it clears the chest's crouch lean,
+## which swings the chest forward to about z = -0.21.
+##
+## What it does *not* survive is a wall you are standing against, and `_clear_of_blocks`
+## deals with that: standing against a block puts its face 0.3 away, so a fixed 0.28 leaves
+## the eye 0.02 from it, inside the camera's near plane, and the world goes see-through.
+## The offset is therefore pulled in per-frame to whatever room there actually is.
+const FP_CAM_FORWARD := 0.28
+
 signal health_changed
 signal hunger_changed
 signal hotbar_changed
 signal selected_changed
 signal died
 signal stats_changed(name: String)
+signal xp_changed
 
 ## Where the camera sits. F5 cycles FIRST -> THIRD_BACK -> SECOND_FRONT.
 enum Cam { FIRST, THIRD_BACK, SECOND_FRONT }
@@ -50,6 +102,11 @@ var world
 var camera: Camera3D
 var cam_pivot: Node3D
 var model
+## The arm-only copy of the model parented to the camera; see FP_HAND_POS.
+var fp_hand
+## The two held-torch lights: one on the camera hand, one on the body's right arm.
+var held_light_fp: OmniLight3D
+var held_light_body: OmniLight3D
 
 var velocity := Vector3.ZERO
 var on_ground := false
@@ -75,6 +132,10 @@ var air := 12.0
 var damage_timer := 0.0
 var regen_timer := 0.0
 var dead := false
+## Experience: `xp` is the progress into the current level, `level` the level itself.
+## Levels are what the enchanting table spends; the points are just the bar.
+var xp := 0
+var level := 0
 
 var yaw := 0.0
 var pitch := 0.0
@@ -130,14 +191,46 @@ func _ready() -> void:
 	cam_pivot.add_child(camera)
 
 	# The body is on screen in every camera mode, first person included: that is what you
-	# see when you look down, and what casts your shadow. There used to be a second,
-	# camera-mounted arm and a floating block cube doing duty as "the first person hand";
-	# with a real body visible they were a duplicate, so the body's own arm -- which
-	# already carries the held block -- is the only thing drawing it now.
+	# see when you look down, and what casts your shadow.
 	model = load("res://scripts/player_model.gd").new()
 	model.name = "Body"
 	add_child(model)
 	refresh_skin()
+
+	# The first-person hand: a second, arm-only copy of the model, parented to the camera.
+	# The body still supplies the chest, legs and left arm you see when looking down; only
+	# its right arm is hidden in first person, so the hand never shows up twice.
+	fp_hand = load("res://scripts/player_model.gd").new()
+	fp_hand.name = "FirstPersonHand"
+	cam_pivot.add_child(fp_hand)
+	fp_hand.rotation = FP_HAND_ROT
+	fp_hand.scale = Vector3.ONE * FP_HAND_SCALE
+	# the model's root is at the feet, so slide the rig back by where the shoulder sits
+	# inside the model (rotated and scaled) to land the shoulder where we want it
+	fp_hand.position = FP_HAND_SHOULDER \
+		- Basis.from_euler(FP_HAND_ROT) * (FP_ARM_LOCAL * FP_HAND_SCALE)
+	fp_hand.head.visible = false
+	fp_hand.torso.visible = false
+	fp_hand.arm_l.visible = false
+	fp_hand.leg_r.visible = false
+	fp_hand.leg_l.visible = false
+	# the camera hand is a viewmodel, not part of the world: it must not throw a shadow
+	# onto the ground a metre in front of the player, which is what an arm pinned to the
+	# camera would otherwise do
+	for part in [fp_hand.head, fp_hand.torso, fp_hand.arm_r, fp_hand.arm_l,
+			fp_hand.leg_r, fp_hand.leg_l]:
+		part.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	refresh_skin()
+
+	# the torch you are carrying. Two nodes, because the hand you can see in first person
+	# is a viewmodel on the camera while the one you can see in third person is the body's
+	# own arm; only the one belonging to the current camera mode is switched on.
+	held_light_fp = _make_held_light()
+	held_light_fp.position = HELD_LIGHT["offset"]
+	fp_hand.arm_r.add_child(held_light_fp)
+	held_light_body = _make_held_light()
+	held_light_body.position = HELD_LIGHT["offset"]
+	model.arm_r.add_child(held_light_body)
 
 	refresh_hand()
 	# the held model must follow *every* change to the hotbar: picking a block up
@@ -148,6 +241,31 @@ func _ready() -> void:
 
 static func item_stack(id: int, count: int) -> Dictionary:
 	return {"id": id, "count": count}
+
+
+func _make_held_light() -> OmniLight3D:
+	var l := OmniLight3D.new()
+	l.light_color = HELD_LIGHT["color"]
+	l.omni_range = HELD_LIGHT["range"]
+	l.light_energy = HELD_LIGHT["energy"]
+	l.omni_attenuation = 0.85
+	l.shadow_enabled = false
+	l.visible = false
+	return l
+
+
+## Switches the carried light on when the held item is something that glows (a torch, a
+## glowstone block, a lamp) and off otherwise. Called from `refresh_hand`, which already
+## runs on every hotbar change.
+func _refresh_held_light() -> void:
+	var id := selected_id()
+	var lit: bool = id > 0 and Blocks.emission[id] > 0
+	# the camera hand only exists in first person, the body's arm only outside it
+	var first: bool = cam_mode == Cam.FIRST
+	if held_light_fp != null:
+		held_light_fp.visible = lit and first
+	if held_light_body != null:
+		held_light_body.visible = lit and not first
 
 
 # ================================================================ setup
@@ -173,6 +291,8 @@ func apply_settings() -> void:
 func refresh_skin() -> void:
 	if model != null:
 		model.refresh_skin(Settings.player_skin, Settings.player_skin_path)
+	if fp_hand != null:
+		fp_hand.refresh_skin(Settings.player_skin, Settings.player_skin_path)
 
 
 func place_at(pos: Vector3) -> void:
@@ -244,14 +364,17 @@ func camera_mode_name() -> String:
 ## mode change or a hotbar change rather than on the next physics frame, so F5 feels
 ## instant and the state is checkable without a world.
 ##
-## The body is never hidden as a whole. First person takes off the head and the chest --
-## see `player_model.set_first_person` for why the chest has to go too -- but keeps the
-## arms and legs drawn. Keeping them drawn is also what makes a shadow land on the
-## ground: an invisible node casts no shadow, and hiding the whole body was why first
-## person used to have none.
+## The body is never hidden as a whole, first person included: the chest, legs and left arm
+## all stay on screen, so looking down shows your own body and the body always casts a
+## shadow. Only the skull comes off in first person -- the camera sits inside it -- and the
+## body's right arm gives way to the camera-mounted hand rig (`fp_hand`).
 func _apply_view_visibility() -> void:
 	if model != null:
 		model.set_first_person(cam_mode == Cam.FIRST)
+	if fp_hand != null:
+		fp_hand.visible = cam_mode == Cam.FIRST
+	# the carried torch follows the hand from one camera mode to the other
+	_refresh_held_light()
 
 
 ## Pulls the camera in when a wall sits between it and the player. Without this the
@@ -270,6 +393,35 @@ func _free_camera_distance(local_dir: Vector3, want: float) -> float:
 	return clampf(origin.distance_to(Vector3(p)) - 0.4, 0.35, want)
 
 
+## Pulls the first-person forward offset in when a block is in the way.
+##
+## Without this the offset walks the eye into the wall you are standing against: at the full
+## 0.28 the eye ends up 0.02 from a block face, which is inside the camera's 0.05 near plane,
+## so the wall is clipped away and you see straight through the world. Crouching made it
+## worse still, because the eye also drops towards the blocks at knee height.
+##
+## The margin is measured from where the ray meets the block, so the eye stops 0.12 short of
+## the face -- comfortably outside the near plane. It is never backed off past the body's
+## own centre, so the eye cannot slide back behind the head.
+func _clear_of_blocks(want: float, eye_y: float) -> float:
+	if want <= 0.0 or world == null:
+		return want
+	var look := -cam_pivot.global_transform.basis.z
+	look.y = 0.0
+	if look.length_squared() < 0.0001:
+		return want
+	look = look.normalized()
+	var origin := global_position + Vector3(0.0, eye_y, 0.0)
+	# the player's own half-width is 0.3, so a solid block can never be nearer than that;
+	# reaching a little past the offset just gives the ray something to find
+	var hit: Dictionary = world.raycast(origin, look, want + 0.34)
+	if hit.is_empty():
+		return want
+	var p: Vector3i = hit["pos"]
+	var face := origin.distance_to(Vector3(p) + Vector3(0.5, 0.5, 0.5)) - 0.5
+	return clampf(face - 0.12, 0.0, want)
+
+
 func feet_aabb() -> AABB:
 	var p := global_position
 	return AABB(Vector3(p.x - HALF, p.y, p.z - HALF), Vector3(HALF * 2, HEIGHT, HALF * 2))
@@ -286,23 +438,60 @@ func _collides_at(p: Vector3) -> bool:
 	for x in range(x0, x1 + 1):
 		for y in range(y0, y1 + 1):
 			for z in range(z0, z1 + 1):
-				if world.is_solid(x, y, z):
+				# The span is the part of the cell the block actually fills: a full cube
+				# is (0, 1), a slab half of that, a carpet a sixteenth. Testing the real
+				# span, rather than "is it solid", is what lets you stand on a slab and
+				# walk under a trapdoor mounted on a ceiling.
+				var span: Vector2 = world.collide_span(x, y, z)
+				if span == Vector2.ZERO:
+					continue
+				var lo := float(y) + span.x
+				var hi := float(y) + span.y
+				if box.position.y < hi - 0.0001 and box.position.y + box.size.y > lo + 0.0001:
 					return true
+	return false
+
+
+## How high the player can step without jumping: enough to mount a slab, a stair or a
+## carpet, not enough to mount a full block (which still needs a jump, as in Minecraft).
+const STEP_HEIGHT := 0.55
+
+
+## Tries to walk up onto a low block after a horizontal move was blocked. Raises the
+## player by up to STEP_HEIGHT, taking the smallest lift that frees the move, and only
+## while on the ground, so a jump is still needed for a full block and for anything with
+## no headroom above it. Returns true when the step succeeded and the move stands.
+func _try_step() -> bool:
+	if not on_ground or flying:
+		return false
+	var y := global_position.y
+	# ascending, so the move takes the smallest lift that clears the obstacle
+	for h in [0.0625, 0.1875, 0.5, STEP_HEIGHT]:
+		global_position.y = y + h
+		if not _collides_at(global_position):
+			return true
+	global_position.y = y
 	return false
 
 
 func in_water() -> bool:
 	var p := global_position
-	return world.is_liquid(floori(p.x), floori(p.y + 0.4), floori(p.z))
+	return world.is_liquid(floori(p.x), floori(p.y + 0.4), floori(p.z)) \
+		and not world.is_lava(floori(p.x), floori(p.y + 0.4), floori(p.z))
 
 
 func head_in_water() -> bool:
 	var p := eye_position()
-	return world.is_liquid(floori(p.x), floori(p.y), floori(p.z))
+	return world.is_liquid(floori(p.x), floori(p.y), floori(p.z)) \
+		and not world.is_lava(floori(p.x), floori(p.y), floori(p.z))
 
 
+## Lava is a liquid too, so `in_water` had to learn to exclude it: swimming and burning
+## are not the same thing.
 func in_lava() -> bool:
-	return false
+	var p := global_position
+	return world.is_lava(floori(p.x), floori(p.y + 0.4), floori(p.z)) \
+		or world.is_lava(floori(p.x), floori(p.y + 1.2), floori(p.z))
 
 
 ## True when any cell the player's body occupies is a ladder. Used for climbing and to
@@ -330,8 +519,9 @@ func _input(event: InputEvent) -> void:
 	# every InputEventMouseMotion before the player ever sees it.
 	if not input_enabled or dead:
 		return
-	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-		return
+	# No mouse_mode test here: with the mouse unlocked the look still has to work from
+	# relative motion, and while a panel is up `input_enabled` is already false, so that
+	# is what keeps a menu from turning the camera.
 	if event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
 		var s := Settings.sensitivity
@@ -363,6 +553,7 @@ func _physics_process(delta: float) -> void:
 		return
 
 	var water := in_water()
+	var lava := in_lava()
 	# sprint: hold Ctrl, or double-tap forward like Minecraft
 	if Input.is_action_just_pressed("forward"):
 		var now := Time.get_ticks_msec() / 1000.0
@@ -390,6 +581,9 @@ func _physics_process(delta: float) -> void:
 	var speed := WALK
 	if flying:
 		speed = FLY_FAST if want_sprint else FLY
+	elif lava:
+		# lava is thick: you barely make headway through it
+		speed = SWIM * 0.3
 	elif water:
 		speed = SWIM
 	elif want_sneak:
@@ -400,7 +594,10 @@ func _physics_process(delta: float) -> void:
 		speed = FLY * 0.4
 
 	var target := move * speed
-	var accel := 12.0 if (on_ground or flying or water) else 3.0
+	# Ground control is snappy, the way Minecraft's is. Air control is deliberately weak:
+	# in Minecraft a jump commits you to the direction you took off in, and being able to
+	# steer freely through the air makes every gap trivially easy and reads as "floaty".
+	var accel := 12.0 if (on_ground or flying or water) else 1.8
 	velocity.x = lerpf(velocity.x, target.x, clampf(accel * delta, 0.0, 1.0))
 	velocity.z = lerpf(velocity.z, target.z, clampf(accel * delta, 0.0, 1.0))
 
@@ -420,6 +617,11 @@ func _physics_process(delta: float) -> void:
 		if Input.is_action_pressed("sneak"):
 			up -= 1.0
 		velocity.y = lerpf(velocity.y, up * speed, clampf(10.0 * delta, 0.0, 1.0))
+	elif lava:
+		# you sink through lava and cannot stroke back out of it, in either direction
+		velocity.y = lerpf(velocity.y, -1.4, clampf(6.0 * delta, 0.0, 1.0))
+		velocity.x *= 0.6
+		velocity.z *= 0.6
 	elif water:
 		# Space swims up and Shift dives; with the head clear of the water Space
 		# becomes a real jump instead, so you can climb out onto the bank
@@ -492,6 +694,9 @@ func _move_axis_x(amount: float) -> void:
 		var before := global_position
 		global_position.x += step
 		if _collides_at(global_position):
+			# a low block is stepped onto rather than stopped by; a full block is not
+			if _try_step():
+				continue
 			global_position = before
 			velocity.x = 0.0
 			return
@@ -506,6 +711,8 @@ func _move_axis_z(amount: float) -> void:
 		var before := global_position
 		global_position.z += step
 		if _collides_at(global_position):
+			if _try_step():
+				continue
 			global_position = before
 			velocity.z = 0.0
 			return
@@ -568,6 +775,12 @@ func _update_stats(delta: float, water: bool) -> void:
 				floori(global_position.z))
 			Sfx.play_varied(Sfx.step_sound_for(b), -16.0, 0.14)
 
+	# lava burns. It is a liquid, so it has to be handled before the air/drowning branch,
+	# which now correctly ignores it.
+	if in_lava():
+		_hurt_tick(4.0, delta)
+		air = 12.0
+
 	# drowning
 	if head_in_water():
 		air -= delta
@@ -628,9 +841,27 @@ func _update_view(delta: float, moving: bool, sneaking: bool) -> void:
 	else:
 		bob = lerpf(bob, 0.0, clampf(delta * 6.0, 0.0, 1.0))
 	var eye := EYE + (target_bob if Settings.view_bob else 0.0)
-	if sneaking and not flying:
-		eye -= 0.24
-	cam_pivot.position = cam_pivot.position.lerp(Vector3(0, eye, 0), clampf(delta * 14.0, 0.0, 1.0))
+	# Crouching drops the eye 0.35, which is Minecraft's own figures exactly: its eye sits
+	# at 1.62 standing and 1.27 crouched.
+	#
+	# Deliberately *not* guarded by `not flying`, the way the rest of the crouch is. In
+	# creative, double-tapping Space turns on flight, and in flight Shift descends -- so the
+	# crouch never happened and the view never dipped, which reads as "sneaking is broken"
+	# rather than as "you are flying". Dipping in flight too costs nothing and means Shift
+	# always answers visually.
+	if sneaking:
+		eye -= 0.35
+	# First person leans the eye forward to the face; every other mode keeps it centred on
+	# the body, because the camera node itself is what gets offset out there. See
+	# FP_CAM_FORWARD for why the first-person eye is not simply at the body's centre.
+	var eye_fwd := FP_CAM_FORWARD if cam_mode == Cam.FIRST else 0.0
+	if sneaking:
+		# ...and a crouch pulls it back toward the body as well as down. Crouching with the
+		# eye still out at the face leaves it hanging over your knees.
+		eye_fwd *= 0.35
+	eye_fwd = _clear_of_blocks(eye_fwd, eye)
+	cam_pivot.position = cam_pivot.position.lerp(Vector3(0, eye, -eye_fwd),
+		clampf(delta * 14.0, 0.0, 1.0))
 	cam_pivot.position.x = cos(bob * 0.5) * 0.02 * (1.0 if moving else 0.0)
 
 	# sprint feedback: a small field-of-view kick, like Minecraft
@@ -668,6 +899,9 @@ func _update_swing(delta: float) -> void:
 		swing = sin((1.0 - swing_t) * PI) * 0.9
 	else:
 		swing = lerpf(swing, 0.0, clampf(delta * 8.0, 0.0, 1.0))
+	# the camera hand punches on the same clock as the body's arm
+	if fp_hand != null:
+		fp_hand.arm_r.rotation.x = -swing * 0.85
 
 
 func _update_interaction(delta: float) -> void:
@@ -701,7 +935,8 @@ func _update_interaction(delta: float) -> void:
 						_break_cooldown = 0.35
 						swing_t = 1.0
 						Sfx.play_varied("dig", -10.0, 0.12)
-						m.hurt_mob(Gear.damage_of(selected_id()), global_position)
+						m.hurt_mob(Gear.damage_of(selected_id())
+							+ Gear.ench_damage_bonus(hotbar[selected]), global_position)
 						if Gear.is_tool(selected_id()):
 							tool_damage_selected(1)
 					_dig_progress = 0.0
@@ -755,12 +990,65 @@ func _update_interaction(delta: float) -> void:
 
 
 func _break_block(pos: Vector3i, id: int) -> void:
+	# a bed is two cells: break either half and the other goes with it, or you are left
+	# with a headless mattress you cannot sleep in and cannot pick up as a whole
+	if id == Blocks.BED or id == Blocks.BED_HEAD:
+		var bf: Vector3i = world.facing_override.get(pos, Vector3i(0, 0, 1))
+		var other: Vector3i = pos + bf if id == Blocks.BED else pos - bf
+		var want: int = Blocks.BED_HEAD if id == Blocks.BED else Blocks.BED
+		if world.get_block(other.x, other.y, other.z) == want:
+			world.set_block(other.x, other.y, other.z, Blocks.AIR)
 	world.set_block(pos.x, pos.y, pos.z, Blocks.AIR)
 	Sfx.play("break", -6.0, randf_range(0.92, 1.08))
 	swing_t = 1.0
 	# the drop, the particles and the leaves-apple roll all live in main.gd, which
 	# owns the item-entity and particle managers
 	block_broken.emit(pos, id)
+
+
+## A bucket picks a fluid up or pours one out, in place: the held bucket becomes its
+## filled or empty self rather than leaving a hole in the hotbar. Only *sources* can be
+## scooped -- a flowing tongue is not a thing you can pick up, which is what stops one
+## bucket from deleting an ocean.
+func _bucket_action(hit: Dictionary, hp: Vector3i, hid: int) -> bool:
+	var id := selected_id()
+	if id == Blocks.ITEM_BUCKET:
+		if (hid == Blocks.WATER or hid == Blocks.LAVA) and world.is_fluid_source(hp):
+			var filled := Blocks.ITEM_WATER_BUCKET if hid == Blocks.WATER \
+				else Blocks.ITEM_LAVA_BUCKET
+			world.set_block(hp.x, hp.y, hp.z, Blocks.AIR)
+			swap_selected(filled)
+			Sfx.play("splash", -8.0, randf_range(0.9, 1.1))
+			swing_t = 0.9
+			return true
+		return false
+	if id != Blocks.ITEM_WATER_BUCKET and id != Blocks.ITEM_LAVA_BUCKET:
+		return false
+	var cell: Vector3i = hit["prev"]
+	if cell.y < VoxelTerrain.MIN_Y or cell.y >= VoxelTerrain.MAX_Y:
+		return false
+	var existing: int = world.get_block(cell.x, cell.y, cell.z)
+	if existing != Blocks.AIR and Blocks.kind[existing] != Blocks.K_CROSS:
+		return false
+	# never pour lava into the space you are standing in
+	if feet_aabb().intersects(AABB(Vector3(cell), Vector3.ONE)):
+		return false
+	var fluid_id := Blocks.WATER if id == Blocks.ITEM_WATER_BUCKET else Blocks.LAVA
+	world.set_block(cell.x, cell.y, cell.z, fluid_id)
+	swap_selected(Blocks.ITEM_BUCKET)
+	Sfx.play("splash", -8.0, randf_range(0.9, 1.1))
+	swing_t = 0.9
+	return true
+
+
+## Replaces what the selected slot holds, keeping its size. Used by the bucket, which
+## swaps itself for its filled or empty form in place.
+func swap_selected(new_id: int) -> void:
+	var s: Dictionary = hotbar[selected]
+	s["id"] = new_id
+	if int(s["count"]) <= 0:
+		s["count"] = 1
+	hotbar_changed.emit()
 
 
 ## Hoe and seeds act on the ground: a hoe turns dirt or grass into farmland, and seeds
@@ -788,8 +1076,47 @@ func _farm_action(hit: Dictionary, hp: Vector3i, hid: int) -> bool:
 	return false
 
 
+## Items that do something other than place a block. Right now that is the ender pearl:
+## thrown at whatever the crosshair is on, and you arrive where it lands. It lands short of
+## the block face so you are never teleported into the block you were aiming at.
+func _item_use(hit: Dictionary) -> bool:
+	if selected_id() != Blocks.ITEM_ENDER_PEARL:
+		return false
+	var eye := eye_position()
+	var dir := look_dir()
+	var target: Vector3
+	if hit.is_empty():
+		target = eye + dir * 40.0
+	else:
+		var hp: Vector3i = hit["pos"]
+		target = Vector3(hp) + Vector3(0.5, 0.5, 0.5) - dir * 1.5
+	var spot: Vector3 = world.safe_spawn_near(target)
+	global_position = spot
+	velocity = Vector3.ZERO
+	consume_selected(1)
+	swing_t = 0.9
+	Sfx.play("splash", -5.0, 1.5)
+	return true
+
+
 func _try_place() -> void:
 	var hit: Dictionary = world.raycast(eye_position(), look_dir(), _reach)
+	# A villager under the crosshair is spoken to, not built over: right-click opens the
+	# trade screen. Answered here, before the block dispatch, so a villager standing on a
+	# block still trades rather than the block behind them being operated.
+	if mobs != null:
+		var vm = mobs.raycast_mob(eye_position(), look_dir(), _reach)
+		if vm != null and str(vm.kind) == "villager":
+			var vd: float = eye_position().distance_to(
+				vm.global_position + Vector3(0, float(vm._h) * 0.5, 0))
+			var bd := _reach + 1.0
+			if not hit.is_empty():
+				var bp: Vector3i = hit["pos"]
+				bd = eye_position().distance_to(Vector3(bp) + Vector3(0.5, 0.5, 0.5))
+			if vd <= bd:
+				swing_t = 0.9
+				vm.interact()
+				return
 	# A block that wants the click is operated, not covered up: a lever flips, a chest
 	# opens, a door swings, a furnace lights up. Only when nothing under the crosshair
 	# wants the click does this fall through to placing a block.
@@ -803,6 +1130,13 @@ func _try_place() -> void:
 		# a hoe tills soil and seeds plant into farmland, rather than placing a block
 		if _farm_action(hit, hp, hid):
 			return
+		# and a bucket fills from, or pours into, a fluid cell
+		if _bucket_action(hit, hp, hid):
+			return
+
+	# an item that is used rather than placed, right where it is held
+	if _item_use(hit):
+		return
 
 	var stack: Dictionary = hotbar[selected]
 	var id: int = stack["id"]
@@ -822,14 +1156,23 @@ func _try_place() -> void:
 	var existing: int = world.get_block(cell.x, cell.y, cell.z)
 	if existing != Blocks.AIR and Blocks.kind[existing] != Blocks.K_CROSS:
 		return
-	# crossed plants and floor plates both need something to stand on
+	# crossed plants, floor plates, carpets and beds all need something to stand on
 	var k := Blocks.kind[id]
-	if (k == Blocks.K_CROSS or k == Blocks.K_FLAT) \
+	if (k == Blocks.K_CROSS or k == Blocks.K_FLAT or k == Blocks.K_CARPET
+			or k == Blocks.K_BED) \
 			and not world.is_solid(cell.x, cell.y - 1, cell.z):
 		return
 	# tell the world which way we were looking, so a piston or repeater points away
 	# from the player rather than always the same way
 	world.set_place_look(look_dir())
+	# ...and, for the shapes whose exact half matters, which way this one placement sits:
+	# a slab or a trapdoor mounted on the underside of a block goes in the top half. Every
+	# placement sets this, zero included, so the previous block's facing never leaks in.
+	var normal: Vector3i = hit.get("normal", Vector3i.ZERO)
+	var pfdir := Vector3i.ZERO
+	if normal.y < 0 and (k == Blocks.K_SLAB or k == Blocks.K_TRAPDOOR):
+		pfdir = Vector3i(0, 1, 0)
+	world.set_place_facing(pfdir)
 	if world.set_block(cell.x, cell.y, cell.z, id):
 		Sfx.play("place", -8.0, randf_range(0.94, 1.06))
 		swing_t = 0.9
@@ -839,6 +1182,14 @@ func _try_place() -> void:
 			var up := Vector3i(cell.x, cell.y + 1, cell.z)
 			if world.get_block(up.x, up.y, up.z) == Blocks.AIR:
 				world.set_block(up.x, up.y, up.z, Blocks.DOOR)
+		# a bed is two cells: the far half is the head, and it comes with the foot. It is
+		# placed along the facing the world just recorded, so the pillow ends up at the far
+		# end rather than on top of the foot.
+		if id == Blocks.BED:
+			var hc: Vector3i = cell + world.placement_facing()
+			if world.get_block(hc.x, hc.y, hc.z) == Blocks.AIR \
+					and not feet_aabb().intersects(AABB(Vector3(hc), Vector3.ONE)):
+				world.set_block(hc.x, hc.y, hc.z, Blocks.BED_HEAD)
 		if not creative:
 			consume_selected(1)
 
@@ -889,6 +1240,39 @@ func can_accept(id: int) -> bool:
 			if int(s["id"]) == id and int(s["count"]) < maxs:
 				return true
 	return false
+
+
+## How many of `id` the player is carrying, hotbar and backpack together. Trading needs
+## to ask "do they have enough?" before it takes anything.
+func count_of(id: int) -> int:
+	var n := 0
+	for list in [hotbar, inventory]:
+		for s in list:
+			if int(s["id"]) == id:
+				n += int(s["count"])
+	return n
+
+
+## Takes up to `n` of `id` out of the hotbar and backpack, draining each stack it finds
+## until the count is met. Returns how many were actually removed, which is at most `n`.
+func remove_count(id: int, n: int) -> int:
+	var want := n
+	var removed := 0
+	for list in [hotbar, inventory]:
+		for s in list:
+			if want <= 0:
+				break
+			if int(s["id"]) != id:
+				continue
+			var take: int = mini(int(s["count"]), want)
+			s["count"] = int(s["count"]) - take
+			if int(s["count"]) <= 0:
+				s["id"] = 0
+			want -= take
+			removed += take
+	if removed > 0:
+		hotbar_changed.emit()
+	return removed
 
 
 func consume_selected(n: int) -> void:
@@ -966,6 +1350,42 @@ func set_mobs(m) -> void:
 	mobs = m
 
 
+# ================================================================ experience
+## The points needed to reach the next level, Minecraft's curve: cheap early, steeper
+## after fifteen, steepest after thirty.
+func xp_to_next() -> int:
+	if level >= 30:
+		return 112 + (level - 30) * 9
+	if level >= 15:
+		return 37 + (level - 15) * 5
+	return 7 + level * 2
+
+
+func add_xp(n: int) -> void:
+	if n <= 0:
+		return
+	xp += n
+	while xp >= xp_to_next() and level < 1000:
+		xp -= xp_to_next()
+		level += 1
+	xp_changed.emit()
+
+
+## Spends `n` levels, for the enchanting table. False (and no change) when the player
+## does not have them.
+func spend_levels(n: int) -> bool:
+	if n <= 0 or level < n:
+		return false
+	level -= n
+	xp_changed.emit()
+	return true
+
+
+## The stack in the selected hotbar slot, for reading enchantments off it.
+func selected_stack() -> Dictionary:
+	return hotbar[selected]
+
+
 ## Wear the selected tool down by `n`. A tool that reaches zero wears out and leaves the
 ## hand. Stacks of one (tools, armour) each carry their own `dur`; everything else has
 ## no durability to lose.
@@ -974,6 +1394,9 @@ func tool_damage_selected(n: int) -> void:
 	var id := int(s["id"])
 	var maxd := Gear.max_durability(id)
 	if maxd <= 0:
+		return
+	# Unbreaking: a level of N skips the wear with probability N/(N+1)
+	if Gear.unbreaking_skips(s):
 		return
 	var d := int(s.get("dur", maxd)) - n
 	if d <= 0:
@@ -993,16 +1416,22 @@ func tool_damage_selected(n: int) -> void:
 ## tool, or nothing.
 func refresh_hand() -> void:
 	var id := selected_id()
-	if model != null:
+	# Both rigs get it: the body's hand for third person, the camera hand for first, so
+	# what you hold is the same thing from either side of the F5 cycle.
+	for m in [model, fp_hand]:
+		if m == null:
+			continue
+		var is_fp: bool = m == fp_hand
 		if id > 0 and Blocks.is_block_item(id):
-			model.set_held_block(id)
-			model.set_held_item(0)
+			m.set_held_block(id, is_fp)
+			m.set_held_item(0)
 		elif Gear.is_tool(id):
-			model.set_held_block(0)
-			model.set_held_item(id)
+			m.set_held_block(0)
+			m.set_held_item(id)
 		else:
-			model.set_held_block(0)
-			model.set_held_item(0)
+			m.set_held_block(0)
+			m.set_held_item(0)
+	_refresh_held_light()
 	_apply_view_visibility()
 
 
@@ -1026,8 +1455,9 @@ func hurt(amount: float, force: bool = false) -> void:
 		return
 	if creative and not force:
 		return
-	# armour absorbs a fraction of the hit, and wears down doing it
-	var reduction := Gear.armor_reduction(armor)
+	# armour absorbs a fraction of the hit, and wears down doing it. Protection adds to
+	# that fraction, on top of the armour points.
+	var reduction := minf(Gear.armor_reduction(armor) + Gear.ench_protection(armor), 0.9)
 	if reduction > 0.0:
 		amount *= 1.0 - reduction
 		_wear_armor()
@@ -1051,6 +1481,8 @@ func _wear_armor() -> void:
 		var id := int(s["id"])
 		var maxd := Gear.max_durability(id)
 		if maxd <= 0:
+			continue
+		if Gear.unbreaking_skips(s):
 			continue
 		var d := int(s.get("dur", maxd)) - 1
 		if d <= 0:
@@ -1090,6 +1522,7 @@ func fall_distance() -> float:
 const RECIPES := [
 	# --- basics
 	{"type": "shapeless", "in": [Blocks.LOG], "out": [Blocks.PLANKS, 4]},
+	{"type": "shapeless", "in": [Blocks.BIRCH_LOG], "out": [Blocks.BIRCH_PLANKS, 4]},
 	{"type": "shapeless", "in": [Blocks.ITEM_COAL, Blocks.ITEM_STICK], "out": [Blocks.TORCH, 4]},
 	{"type": "shaped", "pattern": ["P", "P"], "key": {"P": Blocks.PLANKS},
 		"out": [Blocks.ITEM_STICK, 4]},
@@ -1143,6 +1576,8 @@ const RECIPES := [
 		"out": [Blocks.FURNACE, 1]},
 	{"type": "shaped", "pattern": ["WWW"], "key": {"W": Blocks.ITEM_WHEAT},
 		"out": [Blocks.ITEM_BREAD, 1]},
+	{"type": "shaped", "pattern": ["I I", " I "], "key": {"I": Blocks.ITEM_IRON},
+		"out": [Blocks.ITEM_BUCKET, 1]},
 
 	# --- tools: the same three shapes in a different material per tier
 	{"type": "shaped", "pattern": ["MMM", " S ", " S "], "key": {"M": Blocks.PLANKS, "S": Blocks.ITEM_STICK}, "out": [Blocks.ITEM_WOOD_PICK, 1]},
@@ -1179,6 +1614,41 @@ const RECIPES := [
 	{"type": "shaped", "pattern": ["M M", "MMM", "MMM"], "key": {"M": Blocks.ITEM_DIAMOND}, "out": [Blocks.ITEM_DIAMOND_CHESTPLATE, 1]},
 	{"type": "shaped", "pattern": ["MMM", "M M", "M M"], "key": {"M": Blocks.ITEM_DIAMOND}, "out": [Blocks.ITEM_DIAMOND_LEGGINGS, 1]},
 	{"type": "shaped", "pattern": ["M M", "M M"], "key": {"M": Blocks.ITEM_DIAMOND}, "out": [Blocks.ITEM_DIAMOND_BOOTS, 1]},
+
+	# --- building shapes: stairs, slabs, trapdoors, gates and signs
+	{"type": "shaped", "pattern": ["SSS"], "key": {"S": Blocks.STONE}, "out": [Blocks.SLAB, 6]},
+	{"type": "shaped", "pattern": ["SSS"], "key": {"S": Blocks.PLANKS}, "out": [Blocks.SLAB_WOOD, 6]},
+	{"type": "shaped", "pattern": ["SSS"], "key": {"S": Blocks.COBBLESTONE}, "out": [Blocks.SLAB_COBBLE, 6]},
+	{"type": "shaped", "pattern": ["S  ", "SS ", "SSS"], "key": {"S": Blocks.STONE}, "out": [Blocks.STAIRS, 4]},
+	{"type": "shaped", "pattern": ["S  ", "SS ", "SSS"], "key": {"S": Blocks.PLANKS}, "out": [Blocks.STAIRS_WOOD, 4]},
+	{"type": "shaped", "pattern": ["S  ", "SS ", "SSS"], "key": {"S": Blocks.COBBLESTONE}, "out": [Blocks.STAIRS_COBBLE, 4]},
+	{"type": "shaped", "pattern": ["PP", "PP", "PP"], "key": {"P": Blocks.PLANKS}, "out": [Blocks.TRAPDOOR, 2]},
+	{"type": "shaped", "pattern": ["SPS", "SPS"], "key": {"S": Blocks.ITEM_STICK, "P": Blocks.PLANKS}, "out": [Blocks.FENCE_GATE, 1]},
+	{"type": "shaped", "pattern": ["PPP", "PPP", " S "], "key": {"P": Blocks.PLANKS, "S": Blocks.ITEM_STICK}, "out": [Blocks.SIGN, 3]},
+
+	# --- wool, dye and carpet
+	{"type": "shaped", "pattern": ["SS", "SS"], "key": {"S": Blocks.ITEM_STRING}, "out": [Blocks.WOOL_0, 1]},
+	{"type": "shaped", "pattern": ["WWW", "PPP"], "key": {"W": Blocks.WOOL_0, "P": Blocks.PLANKS}, "out": [Blocks.BED, 1]},
+	{"type": "shaped", "pattern": [" D ", "OOO", "OOO"], "key": {"D": Blocks.ITEM_DIAMOND, "O": Blocks.OBSIDIAN}, "out": [Blocks.ENCHANTING_TABLE, 1]},
+	{"type": "shaped", "pattern": ["SS"], "key": {"S": Blocks.WOOL_0}, "out": [Blocks.CARPET_0, 3]},
+	{"type": "shapeless", "in": [Blocks.FLOWER_RED], "out": [Blocks.ITEM_DYE_14, 1]},
+	{"type": "shapeless", "in": [Blocks.FLOWER_YELLOW], "out": [Blocks.ITEM_DYE_4, 1]},
+	# one recipe per dye: a white wool takes the colour of whatever dye it is soaked in
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_1], "out": [Blocks.WOOL_1, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_2], "out": [Blocks.WOOL_2, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_3], "out": [Blocks.WOOL_3, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_4], "out": [Blocks.WOOL_4, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_5], "out": [Blocks.WOOL_5, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_6], "out": [Blocks.WOOL_6, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_7], "out": [Blocks.WOOL_7, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_8], "out": [Blocks.WOOL_8, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_9], "out": [Blocks.WOOL_9, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_10], "out": [Blocks.WOOL_10, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_11], "out": [Blocks.WOOL_11, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_12], "out": [Blocks.WOOL_12, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_13], "out": [Blocks.WOOL_13, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_14], "out": [Blocks.WOOL_14, 1]},
+	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_15], "out": [Blocks.WOOL_15, 1]},
 ]
 
 
@@ -1322,7 +1792,11 @@ func dig_progress() -> float:
 ## tool divides the base time by its speed; a bare hand or a wrong tool is the base.
 func _dig_need(id: int) -> float:
 	var base := 0.35 + Blocks.hardness[id] * 1.1
-	return base / maxf(1.0, Gear.speed_for(selected_id(), id))
+	var spd := Gear.speed_for(selected_id(), id)
+	# Efficiency speeds up the tool it is on, but only the block that tool is right for
+	if spd > 1.0:
+		spd *= Gear.ench_speed_mult(hotbar[selected])
+	return base / maxf(1.0, spd)
 
 
 ## The block currently being mined, so the HUD can draw the crack overlay there.
@@ -1352,6 +1826,7 @@ func save_state() -> Dictionary:
 		"yaw": yaw, "pitch": pitch,
 		"health": health, "air": air,
 		"hunger": hunger, "exhaustion": exhaustion,
+		"xp": xp, "level": level,
 		"creative": creative, "flying": flying,
 		"selected": selected,
 		"hotbar": hb, "inventory": inv, "armor": ar,
@@ -1359,11 +1834,16 @@ func save_state() -> Dictionary:
 	}
 
 
-## A saved cell is [id, count], plus a third durability entry when the item has one.
+## A saved cell is [id, count], plus a third durability entry when the item has one and
+## a fourth `ench` dictionary when it is enchanted. The dictionary is JSON-safe (string
+## keys, int values), so it rides along in the same file.
 func _cell_save(s: Dictionary) -> Array:
 	var id := int(s["id"])
 	if id > 0 and Gear.max_durability(id) > 0:
-		return [id, int(s["count"]), int(s.get("dur", Gear.max_durability(id)))]
+		var cell := [id, int(s["count"]), int(s.get("dur", Gear.max_durability(id)))]
+		if s.has("ench"):
+			cell.append(s["ench"])
+		return cell
 	return [id, int(s["count"])]
 
 
@@ -1371,6 +1851,8 @@ func _cell_load(cell: Array) -> Dictionary:
 	var st := item_stack(int(cell[0]), int(cell[1]))
 	if cell.size() > 2 and int(cell[0]) > 0:
 		st["dur"] = int(cell[2])
+	if cell.size() > 3 and cell[3] is Dictionary and int(cell[0]) > 0:
+		st["ench"] = cell[3]
 	return st
 
 
@@ -1382,6 +1864,8 @@ func load_state(d: Dictionary) -> void:
 	health = float(d.get("health", MAX_HEALTH))
 	hunger = float(d.get("hunger", MAX_HUNGER))
 	exhaustion = float(d.get("exhaustion", 0.0))
+	xp = int(d.get("xp", 0))
+	level = int(d.get("level", 0))
 	air = float(d.get("air", 12.0))
 	creative = bool(d.get("creative", true))
 	flying = bool(d.get("flying", false))
