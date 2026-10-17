@@ -107,6 +107,8 @@ func _tick_furnace(pos: Vector3i, delta: float) -> void:
 				out["count"] = 0
 			out["count"] = int(out["count"]) + 1
 			_consume_one(inp)
+			# one smelt finished: this is the "cook meat" / "smelt an ingot" milestone
+			Advancements.trigger("smelt", out_id)
 	else:
 		f["cook"] = 0.0
 

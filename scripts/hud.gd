@@ -31,6 +31,9 @@ var water_tint: ColorRect
 var hurt_flash: ColorRect
 var item_label: Label
 var toast_box: VBoxContainer
+## The advancement popups: "Advancement Made!" banners, newest at the top-centre, kept
+## apart from the toast box in the corner so a save message and an unlock never overlap.
+var adv_box: VBoxContainer
 var cursor_icon: InvSlot
 ## The experience bar: a thin track above the hotbar with a green fill and the level
 ## number centred on it.
@@ -227,6 +230,11 @@ func build(p, w, s) -> void:
 	toast_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(toast_box)
 
+	adv_box = VBoxContainer.new()
+	adv_box.alignment = BoxContainer.ALIGNMENT_BEGIN
+	adv_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(adv_box)
+
 	debug_panel = Panel.new()
 	debug_panel.add_theme_stylebox_override("panel",
 		Art._sb_flat(Color(0, 0, 0, 0.55), 0, Color(0, 0, 0, 0)))
@@ -258,6 +266,8 @@ func build(p, w, s) -> void:
 
 	if not I18n.changed.is_connected(_apply_language):
 		I18n.changed.connect(_apply_language)
+	if not Advancements.unlocked.is_connected(_on_advancement):
+		Advancements.unlocked.connect(_on_advancement)
 
 	player.health_changed.connect(refresh_health)
 	player.hunger_changed.connect(refresh_hunger)
@@ -303,6 +313,8 @@ func _layout() -> void:
 	_layout_trade()
 	toast_box.position = Vector2(s.x - 330, 16)
 	toast_box.size = Vector2(314, 300)
+	adv_box.position = Vector2(round((s.x - 400) * 0.5), 16)
+	adv_box.size = Vector2(400, 300)
 	debug_panel.position = Vector2(14, 14)
 	_fit_debug_panel()
 	_layout_chat()
@@ -875,6 +887,69 @@ func toast(msg: String) -> void:
 	tw.tween_callback(l.queue_free)
 
 
+## An advancement was earned: a banner with the icon, "Advancement Made!" and the name.
+## One per unlock, stacked downward, capped at four so a burst (the first few blocks all
+## at once) cannot fill the screen.
+func _on_advancement(id: String) -> void:
+	if root == null:
+		return
+	var d: Dictionary = Advancements.def_of(id)
+	if d.is_empty():
+		return
+	Sfx.play("advance", -5.0, 1.0)
+	while adv_box.get_child_count() >= 4:
+		var old: Node = adv_box.get_child(0)
+		adv_box.remove_child(old)
+		old.queue_free()
+	# an HBox wrapper with centred alignment keeps the panel snug to its contents instead
+	# of stretching to the full width of the box
+	var wrap := HBoxContainer.new()
+	wrap.alignment = BoxContainer.ALIGNMENT_CENTER
+	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	adv_box.add_child(wrap)
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel",
+		Art._sb_flat(Color(0.07, 0.08, 0.11, 0.94), 3, Color(0.86, 0.72, 0.32, 0.95)))
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wrap.add_child(panel)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	panel.add_child(_pad(row, 10))
+
+	var icon := TextureRect.new()
+	icon.texture = Items.icon(int(d["icon"]))
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	icon.custom_minimum_size = Vector2(38, 38)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(icon)
+
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(col)
+
+	var head := Label.new()
+	head.text = I18n.t("Advancement Made!")
+	head.add_theme_font_size_override("font_size", PFont.S)
+	head.add_theme_color_override("font_color", Color(0.88, 0.78, 0.40))
+	col.add_child(head)
+
+	var nm := Label.new()
+	nm.text = I18n.t(str(d["name"]))
+	nm.add_theme_font_size_override("font_size", PFont.M)
+	col.add_child(nm)
+
+	panel.modulate = Color(1, 1, 1, 0)
+	var tw := create_tween()
+	tw.tween_property(panel, "modulate", Color(1, 1, 1, 1), 0.25)
+	tw.tween_interval(3.4)
+	tw.tween_property(panel, "modulate", Color(1, 1, 1, 0), 0.6)
+	tw.tween_callback(wrap.queue_free)
+
+
 func _process(delta: float) -> void:
 	if _item_label_t > 0.0:
 		_item_label_t -= delta
@@ -1438,6 +1513,7 @@ func _on_inv_slot(index: int, button: int) -> void:
 			cur["count"] = int(cur["count"]) + int(res["count"])
 		player.consume_crafting()
 		Sfx.play("craft", -8.0)
+		Advancements.trigger("craft", int(res["id"]))
 		refresh_inventory()
 		return
 

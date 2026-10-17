@@ -61,6 +61,7 @@ func update(player_pos: Vector3, delta: float) -> void:
 		if it.in_reach(player_pos) and player.can_accept(it.item_id):
 			player.give(it.item_id, it.count)
 			Sfx.play("pop", -11.0, randf_range(1.05, 1.35))
+			Advancements.trigger("obtain", it.item_id)
 			it.queue_free()
 			continue
 		alive.append(it)

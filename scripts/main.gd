@@ -311,6 +311,9 @@ func _on_block_hit(pos: Vector3i, id: int) -> void:
 func _on_block_broken(pos: Vector3i, id: int) -> void:
 	var at := _block_center(pos)
 	particles.burst(at, Blocks.average_color(id), 12)
+	# a broken block counts toward the mining milestones in any game mode, the same way
+	# mob loot does: a creative player breaking a diamond ore still earns the find
+	Advancements.trigger("break", id)
 	# a broken chest or furnace spills what it held, in any game mode
 	if id == Blocks.CHEST or id == Blocks.FURNACE or id == Blocks.FURNACE_LIT:
 		containers.remove(pos)
@@ -358,6 +361,7 @@ func _is_wheat(id: int) -> bool:
 func _on_mob_died(kind: String, pos: Vector3) -> void:
 	Sfx.play("mob_die", -6.0, randf_range(0.9, 1.1))
 	particles.burst(pos + Vector3(0, 0.4, 0), Color(0.4, 0.4, 0.4), 10)
+	Advancements.trigger("kill", kind)
 	# killing something is worth experience; the orbs fly to the player
 	_spawn_xp(pos, _mob_xp(kind))
 	match kind:
@@ -470,6 +474,7 @@ func _on_new_world(nm: String, s: int, creative: bool, distance: int, cheats: bo
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
+	Advancements.reset()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
 	world.ao_enabled = Settings.quality > 0
@@ -549,6 +554,7 @@ func _seed_network_world(s: int, creative: bool, distance: int, cheats: bool,
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
+	Advancements.reset()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
 	world.ao_enabled = Settings.quality > 0
@@ -640,6 +646,10 @@ func _on_load_world(dir_name: String) -> void:
 	if ps is Dictionary:
 		player.reset_inventory()
 		player.load_state(ps)
+	# advancement progress travels with the world, in the level file rather than its own
+	# binary; a save made before this key existed simply loads with nothing earned
+	var adv = meta.get("advancements", {})
+	Advancements.load_from(adv if adv is Dictionary else {})
 	_begin_loading()
 
 
@@ -819,6 +829,7 @@ func _on_bed_used(pos: Vector3i) -> void:
 	spawn_point = Vector3(float(pos.x) + 0.5, float(pos.y), float(pos.z) + 0.5)
 	hud.toast(I18n.t("Good morning."))
 	Sfx.play("click", -6.0, 1.1)
+	Advancements.trigger("sleep")
 
 
 ## Right-clicking the enchanting table offers up to three enchantments for the held
@@ -869,6 +880,7 @@ func _on_enchant_choice(index: int) -> void:
 	player.hotbar_changed.emit()
 	hud.toast(I18n.t("Enchanted!"))
 	Sfx.play("click", -5.0, 1.25)
+	Advancements.trigger("enchant")
 	_close_enchant()
 
 
@@ -961,6 +973,7 @@ func _on_trade_choice(index: int) -> void:
 	player.notify_inventory_changed()
 	hud.toast(I18n.tf("Traded for %d %s.", [rn, Items.name_of(rid)]))
 	Sfx.play("click", -5.0, 1.2)
+	Advancements.trigger("trade")
 
 
 func _close_trade() -> void:
@@ -1217,6 +1230,7 @@ func _save_game() -> void:
 		"weather_timer": sky.weather_timer,
 		"spawn": [spawn_point.x, spawn_point.y, spawn_point.z],
 		"player": player.save_state(),
+		"advancements": Advancements.serialize(),
 		"saved_at": Time.get_datetime_string_from_system(),
 	}
 	var f := FileAccess.open("%s/level.json" % base, FileAccess.WRITE)
@@ -2451,6 +2465,64 @@ func _run_selftest() -> void:
 			used and player.count_of(Blocks.ITEM_ENDER_PEARL) == 0
 			and player.global_position.distance_to(pbefore) > 1.0,
 			"moved %.1f" % player.global_position.distance_to(pbefore))
+
+	# 15. the advancement system: rule matching, counted goals, thresholds and the round
+	# trip through the save file. Checked against the definitions themselves, so a
+	# milestone that stops matching its event is caught rather than silently missing.
+	Advancements.reset()
+	_check("a reset advancement list is empty", Advancements.done_count() == 0)
+	Advancements.trigger("break", Blocks.GRASS)
+	_check("breaking the first block earns the root", Advancements.is_done("root"))
+	Advancements.trigger("break", Blocks.DIRT)
+	_check("an unmatched block earns nothing new", Advancements.done_count() == 1,
+		"%d unlocked" % Advancements.done_count())
+	Advancements.trigger("craft", Blocks.ITEM_WOOD_PICK)
+	_check("the right result earns its milestone", Advancements.is_done("wood_pick"))
+	Advancements.trigger("craft", Blocks.ITEM_STONE_PICK)
+	_check("a second craft earns its own milestone", Advancements.is_done("stone_pick"))
+	# a counted goal ticks up one event at a time and only unlocks at the goal
+	var before_n := Advancements.progress_of("miner")
+	Advancements.trigger("break", Blocks.STONE)
+	_check("a counted goal advances by one", Advancements.progress_of("miner") == before_n + 1,
+		"%d -> %d" % [before_n, Advancements.progress_of("miner")])
+	Advancements.trigger("break", Blocks.STONE)
+	_check("...and is not unlocked before its goal", not Advancements.is_done("miner"))
+	for i in 120:
+		Advancements.trigger("break", Blocks.STONE)
+	_check("the goal unlocks when the count reaches it", Advancements.is_done("miner"))
+	# the kill event carries a species name, matched against the hostile roster
+	Advancements.trigger("kill", "zombie")
+	_check("killing a zombie earns Monster Hunter", Advancements.is_done("hunter"))
+	# a value threshold rather than an event count
+	Advancements.trigger("level", 9)
+	_check("a level below the threshold earns nothing",
+		not Advancements.is_done("experienced"))
+	Advancements.trigger("level", 10)
+	_check("reaching the threshold level earns it", Advancements.is_done("experienced"))
+	# the whole state survives a serialize/reset/load round trip
+	var adv_snap := Advancements.serialize()
+	var adv_n := Advancements.done_count()
+	Advancements.reset()
+	_check("reset really clears it", Advancements.done_count() == 0)
+	Advancements.load_from(adv_snap)
+	_check("the save round-trips every unlock", Advancements.done_count() == adv_n,
+		"%d vs %d" % [Advancements.done_count(), adv_n])
+	_check("...and a counted goal's progress", Advancements.is_done("miner"))
+	# structural sanity: every milestone is in a known group and has a drawable icon, so
+	# the progress screen can never be handed a row that no group lists or a blank picture
+	var bad_icon := 0
+	var bad_group := 0
+	var gids: Array = []
+	for g in Advancements.GROUPS:
+		gids.append(str(g["id"]))
+	for d in Advancements.defs():
+		if not gids.has(str(d["group"])):
+			bad_group += 1
+		if Items.icon(int(d["icon"])) == null:
+			bad_icon += 1
+	_check("every milestone is listed under a real group", bad_group == 0,
+		"%d of %d ungrouped" % [bad_group, Advancements.total()])
+	_check("every milestone has a drawable icon", bad_icon == 0, "%d missing" % bad_icon)
 
 	# The save did its job several checks ago; take it away again at the very end.
 	# Without this every run leaves another "Selftest_<timestamp>" world behind, and
@@ -4030,6 +4102,10 @@ func _check_capture() -> void:
 			_capture = "trapdoor"
 		elif a == "--capture-gate":
 			_capture = "gate"
+		elif a == "--capture-advancements":
+			_capture = "advancements"
+		elif a == "--capture-advpopup":
+			_capture = "advpopup"
 		elif a == "--dump-icons":
 			_capture = "icons"
 		elif a == "--netserve":
@@ -4344,6 +4420,37 @@ func _run_capture() -> void:
 			await _settle()
 			player.pitch = -0.12
 			await _shot("birch_forest.png")
+		"advancements":
+			# the progress screen: earn a spread of milestones so the shot shows finished
+			# rows next to dimmed locked ones, and the two counted goals part-way through
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.running = false
+			for id in ["root", "wood", "bench", "stick", "wood_pick", "stone_pick",
+					"cobble", "coal", "iron", "copper", "diamond", "torch", "furnace",
+					"sword", "hunter", "merchant", "wire", "battery"]:
+				Advancements.grant(str(id))
+			Advancements.set_progress("miner", 42)
+			Advancements.set_progress("builder", 87)
+			_pause()
+			ui.open_screen("advancements")
+			await get_tree().process_frame
+			await get_tree().process_frame
+			await _shot("menu_advancements.png")
+		"advpopup":
+			# the unlock banner, mid-flight at the top of the screen
+			_on_new_world("Preview", _capture_seed, true, 5)
+			await _wait_loaded()
+			sky.time_of_day = 0.5
+			sky.running = false
+			player.pitch = -0.10
+			for i in 6:
+				await get_tree().physics_frame
+			Advancements.trigger("craft", Blocks.ITEM_WOOD_PICK)
+			Advancements.trigger("craft", Blocks.ITEM_STONE_PICK)
+			for i in 24:
+				await get_tree().process_frame
+			await _shot("advancement_popup.png")
 		"diag":
 			_on_new_world("Preview", _capture_seed, true, 5)
 			await _wait_loaded()

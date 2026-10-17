@@ -109,6 +109,29 @@ regenerates when you are nearly full, and an empty bar slowly starves you. Apple
 fall out of leaves and bread is in the creative palette; hold one and right-click
 to eat.
 
+**Advancements**
+
+Forty milestones track how far you have come, in the spirit of Minecraft's
+advancements: break your first block, get wood, benchmark a crafting table, reach
+the Stone Age, smelt iron, find a diamond, trade with a villager, enchant a tool,
+draw your first copper wire. They are grouped into Getting Started, Mining, Building,
+Husbandry, Adventure and Industry, and earning one slides a gold-bordered banner in
+at the top of the screen with its icon, "Advancement Made!" and its name.
+
+Two of them are counted goals rather than a single event — break 100 blocks to become
+a Miner, place 200 to become an Architect — and two fire on a value rather than an
+event: reaching experience level 10 is *Experienced*. The full list, with what each
+one asks for and how many of the forty you have earned, is on the **Advancements**
+screen, opened from the pause menu; earned rows are lit and the rest are dimmed rather
+than hidden, so you can always see what there is left to aim for.
+
+The system is data, not code. Each milestone is one line naming a group, an icon (a
+real item or block id, so the icon renderer draws it), a name, a description and the
+event that earns it, and every trigger funnels through one `Advancements.trigger()`
+call from a place that was already in the code — the block-break hook, the craft
+handler, the item pickup, the furnace tick, the trade and enchant paths. Progress is
+stored in the world's `level.json`, so it travels with the save.
+
 **Mining feedback**
 
 The block you are mining cracks progressively — five stages of generated veins
@@ -308,6 +331,10 @@ only starts scrolling once it runs past ten rows.
 * **Inventory** — 3×3 crafting grid with a result slot, the full recipe list beside
   it, a scrollable creative block palette, a 27-slot backpack and the hotbar. Left
   click moves a whole stack, right click splits one off.
+* **Advancements** — the progress screen, opened from the pause menu: every milestone
+  grouped, with its icon, its description, how many of the group you have earned, and a
+  running tally on the counted goals. Earned rows are lit; the rest are dimmed.
+  Unlocking one raises a banner at the top of the play screen.
 * **Hover tooltips** — resting the pointer on any filled cell in the backpack, the
   hotbar, the palette or the crafting grid pops a floating panel with that item's
   icon, name and a one-line description of what it is for. It follows the pointer,
@@ -392,6 +419,7 @@ scripts/
   settings.gd            autoload: options, InputMap, window/audio/framerate
   sfx.gd                 autoload: synthesised sound effects + looping music
   commands.gd            autoload: command registry, permission levels, console
+  advancements.gd        autoload: milestone definitions, earning rules, progress state
   terrain.gd             worldgen: heightfield, biomes, caves, ore veins, trees
   world.gd               chunk streaming, meshing, light baking, edits, raycasting
   circuit.gd             the power solver: signal propagation and component state
@@ -635,6 +663,14 @@ because an error there is invisible by eye on a 4-pixel limb:
   in the recipe table and name the power parts, compared against
   `Items.name_of` so the check does not depend on the active language. The
   hand-written list it replaced silently stopped at four recipes.
+* **the advancement system is checked as rules, not as test fixtures**: breaking the
+  first block earns the root, an unmatched one earns nothing more, the right craft
+  result earns its own milestone, a counted goal ticks up one event at a time and only
+  unlocks at its goal, the kill event matches on species name, the level milestone only
+  fires past its threshold, and the whole state round-trips through serialize / reset /
+  load. The last two checks run straight over the definition table — every milestone is
+  in a real group and has a drawable icon — so a milestone that stops matching its event
+  is caught rather than silently missing.
 
 It also builds a **synthetic chunk of ocean** (seabed, water up to sea level, and a
 one-block sand bank) and runs the real chunk mesher over it, then swims the player
@@ -681,6 +717,9 @@ run, inverter on a battery, relay, lamp and a plate-fired piston) and `reload` (
 left to the title screen and loaded again — the only path that runs `world.reset()`
 and `setup()` on a live world, and the one that catches a leaked node or a stale
 chunk). There are also
+`advancements` (the progress screen, with a spread of milestones earned and two counted
+goals part-way through) and `advpopup` (the "Advancement Made!" banners mid-flight at
+the top of the play screen),
 `--terrain-stats`, `--diag`, `--winding` and `--dump-atlas`
 diagnostics used while tuning generation, lighting and mesh winding.
 

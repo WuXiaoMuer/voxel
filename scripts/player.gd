@@ -1190,6 +1190,7 @@ func _try_place() -> void:
 			if world.get_block(hc.x, hc.y, hc.z) == Blocks.AIR \
 					and not feet_aabb().intersects(AABB(Vector3(hc), Vector3.ONE)):
 				world.set_block(hc.x, hc.y, hc.z, Blocks.BED_HEAD)
+		Advancements.trigger("place", id)
 		if not creative:
 			consume_selected(1)
 
@@ -1365,10 +1366,14 @@ func add_xp(n: int) -> void:
 	if n <= 0:
 		return
 	xp += n
+	var levelled := false
 	while xp >= xp_to_next() and level < 1000:
 		xp -= xp_to_next()
 		level += 1
+		levelled = true
 	xp_changed.emit()
+	if levelled:
+		Advancements.trigger("level", level)
 
 
 ## Spends `n` levels, for the enchanting table. False (and no change) when the player

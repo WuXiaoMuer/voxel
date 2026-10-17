@@ -43,6 +43,12 @@ var _world_scroll: ScrollContainer
 var _world_vbox: VBoxContainer
 var _loading_bar: ProgressBar
 var _loading_label: Label
+var _adv_panel: Panel
+var _adv_scroll: ScrollContainer
+var _adv_list: VBoxContainer
+var _adv_count: Label
+## Where the progress screen should return to; the pause menu is the only caller.
+var _adv_return := "pause"
 var _quality_btn: Button
 var _fs_btn: Button
 var _vsync_btn: Button
@@ -83,6 +89,10 @@ func _rebuild() -> void:
 	_world_panel = null
 	_world_scroll = null
 	_world_vbox = null
+	_adv_panel = null
+	_adv_scroll = null
+	_adv_list = null
+	_adv_count = null
 	_root = Control.new()
 	_root.name = "MenuRoot"
 	_root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -97,6 +107,7 @@ func _rebuild() -> void:
 	screens["worlds"] = _build_worlds()
 	screens["settings"] = _build_settings()
 	screens["pause"] = _build_pause()
+	screens["advancements"] = _build_advancements()
 	screens["death"] = _build_death()
 	screens["loading"] = _build_loading()
 	for k in screens:
@@ -113,6 +124,8 @@ func open_screen(screen_name: String) -> void:
 	current = screen_name
 	if screen_name == "worlds":
 		_refresh_world_list()
+	elif screen_name == "advancements":
+		_refresh_advancements()
 
 
 func close_all() -> void:
@@ -1003,6 +1016,9 @@ func _build_pause() -> Control:
 	var b_save := _button("SAVE GAME")
 	b_save.pressed.connect(_on_save)
 	col.add_child(b_save)
+	var b_adv := _button("ADVANCEMENTS")
+	b_adv.pressed.connect(_on_pause_advancements)
+	col.add_child(b_adv)
 	var b_quit := _button("SAVE AND QUIT TO TITLE")
 	b_quit.pressed.connect(_on_quit_title)
 	col.add_child(b_quit)
@@ -1029,6 +1045,126 @@ func _on_save() -> void:
 
 func _on_quit_title() -> void:
 	quit_to_title_requested.emit()
+
+
+# ================================================================ advancements
+## The progress screen, opened from the pause menu. A fixed panel with a scroll area,
+## like the world list: each group is a heading with a "n/m" tally, and each milestone a
+## row of icon, name and description. Locked rows are dimmed rather than hidden -- this
+## is a sandbox, and seeing what there is to aim for is the point.
+func _build_advancements() -> Control:
+	var c := Control.new()
+	c.add_child(_bg(1.0))
+	c.add_child(_dark(0.45))
+
+	_adv_panel = Panel.new()
+	_adv_panel.position = Vector2(300, 36)
+	_adv_panel.size = Vector2(680, 640)
+	_adv_panel.add_theme_stylebox_override("panel", Art._sb_texture(Art.tex_panel, 6, 16))
+	c.add_child(_adv_panel)
+
+	var v := VBoxContainer.new()
+	v.position = Vector2(22, 16)
+	v.custom_minimum_size = Vector2(636, 0)
+	v.add_theme_constant_override("separation", 10)
+	_adv_panel.add_child(v)
+
+	v.add_child(_title_label("ADVANCEMENTS"))
+	_adv_count = Label.new()
+	_adv_count.add_theme_font_size_override("font_size", PFont.S)
+	_adv_count.add_theme_color_override("font_color", Color(0.86, 0.78, 0.40))
+	v.add_child(_adv_count)
+
+	_adv_scroll = ScrollContainer.new()
+	_adv_scroll.custom_minimum_size = Vector2(636, 460)
+	_adv_scroll.size = Vector2(636, 460)
+	_adv_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	v.add_child(_adv_scroll)
+	_adv_list = VBoxContainer.new()
+	_adv_list.custom_minimum_size = Vector2(618, 0)
+	_adv_list.add_theme_constant_override("separation", 6)
+	_adv_scroll.add_child(_adv_list)
+
+	var back := _button("BACK", 636)
+	back.pressed.connect(_on_adv_back)
+	v.add_child(back)
+	return c
+
+
+func _on_pause_advancements() -> void:
+	_adv_return = "pause"
+	open_screen("advancements")
+
+
+func _on_adv_back() -> void:
+	open_screen(_adv_return)
+
+
+func _refresh_advancements() -> void:
+	if _adv_list == null:
+		return
+	for ch in _adv_list.get_children():
+		_adv_list.remove_child(ch)
+		ch.queue_free()
+	_adv_count.text = I18n.tf("%d of %d complete", [Advancements.done_count(),
+		Advancements.total()])
+	for g in Advancements.GROUPS:
+		var defs: Array = Advancements.group_defs(str(g["id"]))
+		if defs.is_empty():
+			continue
+		var done_n := 0
+		for d in defs:
+			if Advancements.is_done(str(d["id"])):
+				done_n += 1
+		var head := _section(str(g["name"]))
+		head.text = "%s   (%d/%d)" % [I18n.t(str(g["name"])), done_n, defs.size()]
+		_adv_list.add_child(head)
+		for d in defs:
+			_adv_list.add_child(_adv_row(d))
+
+
+## One milestone row: its icon, name and description, dimmed until it is earned. A counted
+## goal shows its running tally in the name until it is met.
+func _adv_row(d: Dictionary) -> Control:
+	var id := str(d["id"])
+	var done := Advancements.is_done(id)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+
+	var icon := TextureRect.new()
+	icon.texture = Items.icon(int(d["icon"]))
+	icon.custom_minimum_size = Vector2(36, 36)
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	row.add_child(icon)
+
+	var col := VBoxContainer.new()
+	col.custom_minimum_size = Vector2(560, 0)
+	col.add_theme_constant_override("separation", 0)
+	row.add_child(col)
+
+	var nm := Label.new()
+	var base := I18n.t(str(d["name"]))
+	var goal := int(d.get("goal", 1))
+	if goal > 1 and not done:
+		nm.text = "%s   (%d/%d)" % [base, Advancements.progress_of(id), goal]
+	else:
+		nm.text = base
+	nm.add_theme_font_size_override("font_size", PFont.M)
+	if done:
+		nm.add_theme_color_override("font_color", Color(0.88, 0.84, 0.56))
+	col.add_child(nm)
+
+	var ds := Label.new()
+	ds.text = I18n.t(str(d["desc"]))
+	ds.add_theme_font_size_override("font_size", PFont.S)
+	ds.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	ds.add_theme_color_override("font_color", Color(0.72, 0.72, 0.78))
+	col.add_child(ds)
+
+	if not done:
+		row.modulate = Color(0.62, 0.62, 0.66, 1.0)
+	return row
 
 
 # ================================================================ death

@@ -187,6 +187,12 @@ func _build_sounds() -> void:
 		_tone(659.0, 659.0, 0.55, 3.4, 0.24, 0),
 		_tone(784.0, 784.0, 0.60, 3.0, 0.24, 0),
 	]), false)
+	# the advancement chime: a short rising two-note figure, distinct from the level-up
+	# fanfare so an unlock is not confused with gaining a level
+	_sounds["advance"] = _wav(_mix([
+		_tone(587.0, 587.0, 0.30, 5.0, 0.26, 0),
+		_tone(880.0, 880.0, 0.42, 3.6, 0.24, 0),
+	]), false)
 	_sounds["music"] = _wav(_make_music(), true)
 
 	# passive mob voices
