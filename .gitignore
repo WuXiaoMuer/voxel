@@ -4,6 +4,9 @@
 # Export output (build\VoxelCraft.exe)
 build/
 
+# Release packages assembled by the build workflow (and by hand from its steps)
+dist/
+
 # A locally installed engine, if you drop one beside the scripts
 # (see run_game.bat) — never commit a 160 MB binary
 godot/

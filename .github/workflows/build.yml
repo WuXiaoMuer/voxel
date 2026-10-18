@@ -1,0 +1,240 @@
+name: Build
+
+# Builds a package for every platform VoxelCraft ships on, and -- when the run was started
+# by a version tag -- publishes them all as one GitHub Release.
+#
+#   git tag v1.0.0 && git push origin v1.0.0      -> build every package, then release
+#   Actions tab -> Build -> Run workflow          -> build only, as downloadable artifacts
+#
+# Godot is not vendored: every job downloads the 4.5.x engine build and the matching export
+# templates, and both are cached, so only the first run pays for the ~1 GB download.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: "4.5.1"
+
+jobs:
+  export:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # one platform breaking must not cancel the others: a release with four packages out
+      # of five is still a useful release, and the failing job's log is what fixes the fifth
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows, os: windows-latest, preset: "Windows Desktop", out_dir: build/windows,
+              target: VoxelCraft.exe, pkg: zipdir, suffix: windows-x86_64, ext: zip,
+              extra: "--accessibility disabled" }
+          - { name: Linux, os: ubuntu-latest, preset: Linux, out_dir: build/linux,
+              target: VoxelCraft.x86_64, pkg: zipdir, suffix: linux-x86_64, ext: zip, extra: "" }
+          - { name: macOS, os: macos-latest, preset: macOS, out_dir: build/macos,
+              target: VoxelCraft.zip, pkg: file, suffix: macos-universal, ext: zip, extra: "" }
+          - { name: Web, os: ubuntu-latest, preset: Web, out_dir: build/web,
+              target: index.html, pkg: zipdir, suffix: web, ext: zip, extra: "" }
+          - { name: Android, os: ubuntu-latest, preset: Android, out_dir: build/android,
+              target: VoxelCraft.apk, pkg: file, suffix: android-arm64, ext: apk, extra: "" }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The engine and the templates live outside the workspace (the templates have to, Godot
+      # looks for them in a fixed place), so the cache holds the downloads rather than the
+      # installed result -- re-materialising them is a local unzip.
+      - name: Cache the engine download
+        uses: actions/cache@v4
+        with:
+          path: ~/godot-ci
+          key: godot-${{ env.GODOT_VERSION }}-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Install the engine and the export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+          case "$RUNNER_OS" in
+            Linux)   ENGINE="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" ;;
+            Windows) ENGINE="Godot_v${GODOT_VERSION}-stable_win64.exe.zip" ;;
+            macOS)   ENGINE="Godot_v${GODOT_VERSION}-stable_macos.universal.zip" ;;
+          esac
+          mkdir -p "$HOME/godot-ci"
+          [ -f "$HOME/godot-ci/engine.zip" ]    || curl -fsSL -o "$HOME/godot-ci/engine.zip" "$BASE/$ENGINE"
+          [ -f "$HOME/godot-ci/templates.tpz" ] || curl -fsSL -o "$HOME/godot-ci/templates.tpz" "$BASE/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          [ -d "$HOME/godot-ci/engine" ]        || unzip -q -o "$HOME/godot-ci/engine.zip" -d "$HOME/godot-ci/engine"
+          case "$RUNNER_OS" in
+            Linux)   TPL="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable" ;;
+            macOS)   TPL="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable" ;;
+            Windows) TPL="$HOME/AppData/Roaming/Godot/export_templates/${GODOT_VERSION}.stable" ;;
+          esac
+          if [ ! -d "$TPL" ]; then
+            rm -rf "$HOME/godot-ci/tpl"
+            mkdir -p "$HOME/godot-ci/tpl" "$TPL"
+            unzip -q -o "$HOME/godot-ci/templates.tpz" -d "$HOME/godot-ci/tpl"
+            mv "$HOME/godot-ci/tpl/templates/"* "$TPL/"
+          fi
+
+      - name: Locate the engine binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # the macOS download is an .app bundle, so the runnable binary sits inside it
+            BIN=$(find "$HOME/godot-ci/engine" -type f -path '*/Contents/MacOS/*' | head -n1)
+          else
+            BIN=$(find "$HOME/godot-ci/engine" -maxdepth 1 -type f -name 'Godot_v*' ! -name '*.zip' | head -n1)
+          fi
+          chmod +x "$BIN"
+          echo "GODOT_BIN=$BIN" >> "$GITHUB_ENV"
+          "$BIN" --version
+
+      - name: Work out the version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then V="${GITHUB_REF_NAME#v}"; else V="dev-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "packaging VoxelCraft $V"
+
+      # ---- Android's toolchain, which no other platform needs: a JDK, the SDK, and a
+      # keystore to sign the APK with. Godot reads the SDK and JDK from ANDROID_HOME and
+      # JAVA_HOME when its editor settings are empty, and the keystore from the
+      # GODOT_ANDROID_KEYSTORE_DEBUG_* variables -- so no settings file has to be written.
+      - name: Set up the JDK (Android)
+        if: matrix.name == 'Android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache the Android SDK
+        if: matrix.name == 'Android'
+        id: cache_android
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/android-sdk
+            ~/.android
+          key: android-sdk-r34-v1
+
+      - name: Install the Android SDK
+        if: matrix.name == 'Android' && steps.cache_android.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$HOME/android-sdk"
+          mkdir -p "$SDK/cmdline-tools"
+          curl -fsSL -o "$HOME/clt.zip" \
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q -o "$HOME/clt.zip" -d "$SDK/cmdline-tools"
+          mkdir -p "$SDK/cmdline-tools/latest"
+          mv "$SDK/cmdline-tools/cmdline-tools/"* "$SDK/cmdline-tools/latest/"
+          export ANDROID_HOME="$SDK"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair -keystore "$HOME/.android/debug.keystore" -storepass android \
+            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" -noprompt
+
+      # These have to be exported to the job, not just set inside the step above: Godot is
+      # run by a later step, and it is Godot that reads them.
+      - name: Export the Android environment
+        if: matrix.name == 'Android'
+        shell: bash
+        run: |
+          {
+            echo "ANDROID_HOME=$HOME/android-sdk"
+            echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore"
+            echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey"
+            echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android"
+          } >> "$GITHUB_ENV"
+
+      - name: Export
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ matrix.out_dir }}"
+          # one import pass first: the export only sees resources the import step registered
+          "$GODOT_BIN" --headless --path . ${{ matrix.extra }} --import --quit-after 60
+          "$GODOT_BIN" --headless --path . ${{ matrix.extra }} \
+            --export-release "${{ matrix.preset }}" "${{ matrix.out_dir }}/${{ matrix.target }}"
+          ls -l "${{ matrix.out_dir }}"
+
+      - name: Package (Windows)
+        if: matrix.pkg == 'zipdir' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "${{ matrix.out_dir }}\*" `
+            -DestinationPath "dist\VoxelCraft-${{ env.VERSION }}-${{ matrix.suffix }}.${{ matrix.ext }}" -Force
+          Get-ChildItem dist
+
+      # macOS already comes out zipped by the exporter and an APK is an archive in its own
+      # right, so those two are copied as they are; the rest are wrapped so that a download
+      # is a single file.
+      - name: Package
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          OUT="VoxelCraft-${VERSION}-${{ matrix.suffix }}"
+          case "${{ matrix.pkg }}" in
+            zipdir) ( cd "${{ matrix.out_dir }}" && zip -qr "$GITHUB_WORKSPACE/dist/$OUT.zip" . ) ;;
+            file)   cp "${{ matrix.out_dir }}/${{ matrix.target }}" "dist/$OUT.${{ matrix.ext }}" ;;
+          esac
+          ls -l dist
+
+      # ---- the Windows installer, on top of the portable build
+      - name: Package the Windows installer
+        if: matrix.name == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DAppVersion=${{ env.VERSION }}" `
+                  "/DPayloadDir=$PWD\${{ matrix.out_dir }}" `
+                  "/DIconFile=$PWD\assets\icon\voxelcraft_deep.ico" `
+                  "/DDistDir=$PWD\dist" `
+                  "tools\voxelcraft.iss"
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoxelCraft-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: export
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "VoxelCraft ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi

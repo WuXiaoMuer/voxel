@@ -45,6 +45,36 @@ template is used, since that is all a release build needs.
 > *"Invalid export preset name"* and an empty list of presets, which reads like a missing
 > preset rather than a file-encoding problem. PowerShell's `Set-Content` adds a BOM.
 
+## Releases
+
+Every tagged version is built and published by **GitHub Actions** (see
+[`.github/workflows/build.yml`](.github/workflows/build.yml)), so a release is one tag:
+
+```
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow builds a package for each platform, in parallel, and attaches them all to a
+GitHub Release:
+
+| Platform | Package |
+| --- | --- |
+| Windows | `VoxelCraft-<version>-windows-x86_64.zip` — the portable `VoxelCraft.exe` |
+| Windows | `VoxelCraft-<version>-setup.exe` — an Inno Setup installer (Start menu entry, uninstaller) |
+| Linux | `VoxelCraft-<version>-linux-x86_64.zip` |
+| macOS | `VoxelCraft-<version>-macos-universal.zip` — an `.app` for Intel and Apple silicon |
+| Web | `VoxelCraft-<version>-web.zip` — serve it over HTTP and play in a browser |
+| Android | `VoxelCraft-<version>-android-arm64.apk` |
+
+Run the **Build** workflow by hand from the Actions tab to get the same five packages as
+downloadable artifacts **without** publishing anything — that is the way to test a build
+before tagging it.
+
+Two caveats that come from building without an account anywhere: the macOS app is
+**unsigned**, so the first launch needs *right-click → Open*; and the Android APK is signed
+with a throwaway debug key, so installing it needs *install from unknown sources*.
+
 ## Controls
 
 | Key | Action |
@@ -653,7 +683,10 @@ assets/                  brand assets: icon set, banners, promo frames
   screenshots/           promo frames built from previews/ (en + zh)
 tools/
   make_brand_assets.py   regenerates everything under assets/ from code
-export_presets.cfg       the Windows Desktop export preset (UTF-8, no BOM!)
+  voxelcraft.iss         the Inno Setup script behind the Windows installer
+.github/workflows/
+  build.yml              builds every platform's package and publishes the release
+export_presets.cfg       the export presets, one per platform (UTF-8, no BOM!)
 build_exe.bat            exports a self-contained build\VoxelCraft.exe
 run_game.bat             runs the project from source
 open_editor.bat          opens it in the Godot editor

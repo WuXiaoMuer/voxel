@@ -39,6 +39,33 @@
 > 导出随后会以 *"Invalid export preset name"* 报错并给出一个空的预设列表，看起来像预设缺失，
 > 实则是文件编码问题。PowerShell 的 `Set-Content` 会添加 BOM。
 
+## 发布版本
+
+每个打上版本号的 tag 都会由 **GitHub Actions** 自动编译并发布（见
+[`.github/workflows/build.yml`](.github/workflows/build.yml)），所以发布一个版本只需要打一个 tag：
+
+```
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+工作流会并行地为每个平台编译一个包，并把它们全部附到一个 GitHub Release 上：
+
+| 平台 | 发布物 |
+| --- | --- |
+| Windows | `VoxelCraft-<版本>-windows-x86_64.zip` —— 便携版 `VoxelCraft.exe` |
+| Windows | `VoxelCraft-<版本>-setup.exe` —— Inno Setup 安装程序（含开始菜单项与卸载） |
+| Linux | `VoxelCraft-<版本>-linux-x86_64.zip` |
+| macOS | `VoxelCraft-<版本>-macos-universal.zip` —— 同时支持 Intel 与 Apple 芯片的 `.app` |
+| Web | `VoxelCraft-<版本>-web.zip` —— 用 HTTP 托管即可在浏览器里玩 |
+| Android | `VoxelCraft-<版本>-android-arm64.apk` |
+
+在 Actions 页手动运行 **Build** 工作流，可以拿到同样的五个包作为 artifact 下载，但
+**不会**发布任何东西 —— 打 tag 之前想验证一次编译，走这条路径。
+
+有两个因为没有签名账号而必然存在的提醒：macOS 的 `.app` 是**未签名**的，首次打开需要
+*右键 → 打开*；Android 的 APK 用的是临时调试密钥签名，安装时需要允许*未知来源*。
+
 ## 操作
 
 | 按键 | 作用 |
@@ -481,7 +508,10 @@ assets/                  品牌素材：图标套件、横幅、宣传图
   screenshots/           基于 previews/ 制作的宣传图（中英两套）
 tools/
   make_brand_assets.py   用代码重新生成 assets/ 下的一切
-export_presets.cfg       Windows Desktop 导出预设（UTF-8，无 BOM！）
+  voxelcraft.iss         Windows 安装程序背后的 Inno Setup 脚本
+.github/workflows/
+  build.yml              编译各平台发布包并发布 release
+export_presets.cfg       各平台各一份的导出预设（UTF-8，无 BOM！）
 build_exe.bat            导出自包含的 build\VoxelCraft.exe
 run_game.bat             从源码运行工程
 open_editor.bat          在 Godot 编辑器中打开它
