@@ -75,6 +75,14 @@ Two caveats that come from building without an account anywhere: the macOS app i
 **unsigned**, so the first launch needs *right-click → Open*; and the Android APK is signed
 with a throwaway debug key, so installing it needs *install from unknown sources*.
 
+Three things the workflow depends on, worth knowing before changing it. arm64 builds — macOS
+and Android — refuse to export at all unless **ETC2/ASTC import** is on, which is why
+`project.godot` sets `rendering/textures/vram_compression/import_etc2_astc`. The Android job
+generates its own keystore and hands it to Godot through the
+`GODOT_ANDROID_KEYSTORE_DEBUG_*` and `..._RELEASE_*` variables, signing the release APK with
+it. And the Windows installer is compiled by **Inno Setup**, which the Windows runner
+installs if it is not already there.
+
 ## Controls
 
 | Key | Action |

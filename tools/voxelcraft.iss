@@ -56,7 +56,9 @@ OutputBaseFilename=VoxelCraft-{#AppVersion}-setup
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cmbCreateDesktopShortcut}"; GroupDescription: "{cmbAdditionalIcons}"; Flags: unchecked
+; plain strings rather than Inno's message constants: the installer ships in English only,
+; so there is nothing to localise, and a literal cannot be an unknown constant
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
 Source: "{#PayloadDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -66,4 +68,4 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "{cmbLaunchApp}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

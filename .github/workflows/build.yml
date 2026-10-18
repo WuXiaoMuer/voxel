@@ -120,7 +120,7 @@ jobs:
           path: |
             ~/android-sdk
             ~/.android
-          key: android-sdk-r34-v1
+          key: android-sdk-r35-v1
 
       - name: Install the Android SDK
         if: matrix.name == 'Android' && steps.cache_android.outputs.cache-hit != 'true'
@@ -136,7 +136,9 @@ jobs:
           mv "$SDK/cmdline-tools/cmdline-tools/"* "$SDK/cmdline-tools/latest/"
           export ANDROID_HOME="$SDK"
           yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platform-tools" \
+            "platforms;android-34" "platforms;android-35" \
+            "build-tools;34.0.0" "build-tools;35.0.0"
           mkdir -p "$HOME/.android"
           keytool -genkeypair -keystore "$HOME/.android/debug.keystore" -storepass android \
             -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
@@ -153,6 +155,11 @@ jobs:
             echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore"
             echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey"
             echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android"
+            # a *release* export signs with the release keystore, so the same key has to be
+            # offered as both -- without this the release build refuses to sign at all
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_PATH=$HOME/.android/debug.keystore"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_USER=androiddebugkey"
+            echo "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD=android"
           } >> "$GITHUB_ENV"
 
       - name: Export

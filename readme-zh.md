@@ -66,6 +66,12 @@ git push origin v1.0.0
 有两个因为没有签名账号而必然存在的提醒：macOS 的 `.app` 是**未签名**的，首次打开需要
 *右键 → 打开*；Android 的 APK 用的是临时调试密钥签名，安装时需要允许*未知来源*。
 
+工作流依赖三件事，改动它之前值得知道：arm64 目标（macOS 与 Android）在没开启 **ETC2/ASTC 导入**
+时会直接拒绝导出，这正是 `project.godot` 里设 `rendering/textures/vram_compression/import_etc2_astc`
+的原因；Android 这一路会自己生成密钥，并通过 `GODOT_ANDROID_KEYSTORE_DEBUG_*` 与 `..._RELEASE_*`
+环境变量交给 Godot，用它给 release APK 签名；Windows 安装程序由 **Inno Setup** 编译，Windows
+runner 上没装的话会自动装上。
+
 ## 操作
 
 | 按键 | 作用 |
