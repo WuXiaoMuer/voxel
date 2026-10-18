@@ -10,6 +10,10 @@ const AXE := 1
 const SHOVEL := 2
 const SWORD := 3
 const HOE := 4
+## Shears: a real mining tool, but only for leaves.
+const SHEARS := 5
+## A held item that wears out but digs nothing faster: flint and steel, the fishing rod.
+const UTILITY := 6
 
 # armour slots
 const SLOT_HELMET := 0
@@ -53,6 +57,18 @@ func _build() -> void:
 				"dmg": int(t["dmg"][kind]), "dur": int(t["dur"]), "set": tier_name,
 			}
 
+	# the specials: shears mine leaves fast, while flint and steel and the fishing rod are
+	# held items that wear out but speed up no block at all
+	TOOLS[Blocks.ITEM_SHEARS] = {
+		"kind": SHEARS, "tier": 0, "speed": 5.0, "dmg": 1, "dur": 238, "set": "",
+	}
+	TOOLS[Blocks.ITEM_FLINT_STEEL] = {
+		"kind": UTILITY, "tier": 0, "speed": 1.0, "dmg": 1, "dur": 64, "set": "",
+	}
+	TOOLS[Blocks.ITEM_FISHING_ROD] = {
+		"kind": UTILITY, "tier": 0, "speed": 1.0, "dmg": 1, "dur": 64, "set": "",
+	}
+
 	var sets := {
 		"leather": {"points": [1, 3, 2, 1], "dur": [55, 80, 75, 65]},
 		"iron": {"points": [2, 6, 5, 2], "dur": [165, 240, 225, 195]},
@@ -82,6 +98,8 @@ func _build() -> void:
 		Blocks.ITEM_PORKCHOP_RAW: Blocks.ITEM_PORKCHOP_COOKED,
 		Blocks.ITEM_BEEF_RAW: Blocks.ITEM_BEEF_COOKED,
 		Blocks.ITEM_CHICKEN_RAW: Blocks.ITEM_CHICKEN_COOKED,
+		Blocks.ITEM_POTATO: Blocks.ITEM_BAKED_POTATO,
+		Blocks.ITEM_FISH_RAW: Blocks.ITEM_FISH_COOKED,
 	}
 	FUEL = {
 		Blocks.ITEM_COAL: 80.0,
@@ -115,6 +133,8 @@ func _build() -> void:
 		Blocks.FENCE: AXE, Blocks.LADDER: AXE,
 		Blocks.DIRT: SHOVEL, Blocks.GRASS: SHOVEL, Blocks.SAND: SHOVEL,
 		Blocks.GRAVEL: SHOVEL, Blocks.SNOW: SHOVEL, Blocks.FARMLAND: SHOVEL,
+		# shears shear leaves quickly; nothing else maps to the SHEARS kind
+		Blocks.LEAVES: SHEARS, Blocks.BIRCH_LEAVES: SHEARS,
 	}
 
 

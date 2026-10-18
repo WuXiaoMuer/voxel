@@ -49,6 +49,8 @@ var _adv_list: VBoxContainer
 var _adv_count: Label
 ## Where the progress screen should return to; the pause menu is the only caller.
 var _adv_return := "pause"
+## The death screen's "where you died" line, set when the player dies.
+var _death_info: Label
 var _quality_btn: Button
 var _fs_btn: Button
 var _vsync_btn: Button
@@ -93,6 +95,7 @@ func _rebuild() -> void:
 	_adv_scroll = null
 	_adv_list = null
 	_adv_count = null
+	_death_info = null
 	_root = Control.new()
 	_root.name = "MenuRoot"
 	_root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -1092,6 +1095,12 @@ func _build_advancements() -> Control:
 
 
 func _on_pause_advancements() -> void:
+	open_advancements()
+
+
+## The progress screen, opened from the pause menu or with `L`. It always returns to the
+## pause menu, because that is the only place it can be opened from.
+func open_advancements() -> void:
 	_adv_return = "pause"
 	open_screen("advancements")
 
@@ -1176,6 +1185,14 @@ func _build_death() -> Control:
 	var t := _title_label("YOU DIED!", PFont.XL)
 	t.modulate = Color(1.0, 0.35, 0.30)
 	col.add_child(t)
+	# where you fell: without it, a death in a cave leaves no way back to your things
+	_death_info = Label.new()
+	_death_info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_death_info.add_theme_font_size_override("font_size", PFont.S)
+	_death_info.add_theme_color_override("font_color", Color(0.86, 0.72, 0.72))
+	_death_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_death_info.custom_minimum_size = Vector2(320, 0)
+	col.add_child(_death_info)
 	col.add_child(_title_label("Respawn to keep building.", PFont.S))
 	var b := _button("RESPAWN")
 	b.pressed.connect(_on_respawn)
@@ -1188,6 +1205,13 @@ func _build_death() -> Control:
 
 func _on_respawn() -> void:
 	respawn_requested.emit()
+
+
+## Fills in the death screen's location line. main calls this right after opening the
+## screen, because the coordinates only exist at the moment of death.
+func set_death_info(text: String) -> void:
+	if _death_info != null:
+		_death_info.text = text
 
 
 # ================================================================ loading

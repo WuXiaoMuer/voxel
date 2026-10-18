@@ -52,6 +52,9 @@ var _fps_smooth := 60.0
 var _needs_spawn_fix := false
 var _crack_mat: StandardMaterial3D
 var _crack_stage := -1
+## Lit TNT fuses, as {pos, t}: a fuse is the only block that destroys itself on a timer.
+var _fuses: Array = []
+var _night_vision := false
 ## Where the player respawns after dying. Set to the world spawn on load, and moved to a
 ## bed the player sleeps in.
 var spawn_point := Vector3.ZERO
@@ -120,6 +123,9 @@ func _ready() -> void:
 	player.block_hit.connect(_on_block_hit)
 	player.block_broken.connect(_on_block_broken)
 	player.item_thrown.connect(_on_item_thrown)
+	player.mob_dropped.connect(_on_mob_dropped)
+	player.tnt_lit.connect(_on_tnt_lit)
+	player.dispenser_fired.connect(_on_dispenser_fired)
 	item_entities.setup(world, player)
 
 	# Combat wiring: skeletons fire at the player, mobs can hurt the player, and the
@@ -335,6 +341,9 @@ func _on_block_broken(pos: Vector3i, id: int) -> void:
 	# tall grass sometimes holds seeds, the way leaves hold an apple
 	if id == Blocks.TALL_GRASS and randf() < 0.4:
 		item_entities.drop(Blocks.ITEM_SEEDS, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
+	# gravel sometimes hides a shard of flint, which is half of flint and steel
+	if id == Blocks.GRAVEL and randf() < 0.12:
+		item_entities.drop(Blocks.ITEM_FLINT, 1, Vector3(at.x, float(pos.y) + 0.25, at.z))
 	# ores are worth experience to mine, as in Minecraft
 	var ore_xp := 0
 	match id:
@@ -444,6 +453,49 @@ func _on_item_thrown(id: int, count: int) -> void:
 		dir * 4.5 + Vector3(0.0, 2.0, 0.0))
 
 
+## Wool from shearing, a fish off the line: player has no drop manager, so the interaction
+## hands the drop here.
+func _on_mob_dropped(id: int, count: int, pos: Vector3) -> void:
+	item_entities.drop(id, count, pos)
+
+
+## Flint and steel lit a TNT block: start its fuse. It goes off through the same blast
+## path a creeper uses, so the crater and the knockback match.
+func _on_tnt_lit(pos: Vector3i) -> void:
+	for f in _fuses:
+		if f["pos"] == pos:
+			return
+	_fuses.append({"pos": pos, "t": 2.5})
+	hud.toast(I18n.t("The fuse is lit!"))
+
+
+## Counts a lit fuse down, and blows the block when it runs out.
+func _tick_fuses(delta: float) -> void:
+	if _fuses.is_empty():
+		return
+	var keep: Array = []
+	for f in _fuses:
+		var pos: Vector3i = f["pos"]
+		if world.get_block(pos.x, pos.y, pos.z) != Blocks.TNT:
+			continue
+		f["t"] = float(f["t"]) - delta
+		if float(f["t"]) <= 0.0:
+			world.set_block(pos.x, pos.y, pos.z, Blocks.AIR)
+			Advancements.trigger("tnt")
+			_on_explode(_block_center(pos), 4.0)
+		else:
+			keep.append(f)
+	_fuses = keep
+
+
+## An arrow was handed to a dispenser: launch it from the block, along the aim.
+func _on_dispenser_fired(pos: Vector3i, dir: Vector3) -> void:
+	if projectiles == null:
+		return
+	var d := dir.normalized()
+	projectiles.spawn(_block_center(pos) + d * 0.7, d, 26.0, 4.0, false)
+
+
 # ================================================================ modes
 func _enter_title() -> void:
 	# leaving a session always drops the socket: a stale host peer would keep the port
@@ -474,6 +526,7 @@ func _on_new_world(nm: String, s: int, creative: bool, distance: int, cheats: bo
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
+	_fuses = []
 	Advancements.reset()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
@@ -554,6 +607,7 @@ func _seed_network_world(s: int, creative: bool, distance: int, cheats: bool,
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
+	_fuses = []
 	Advancements.reset()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
@@ -591,6 +645,7 @@ func _on_load_world(dir_name: String) -> void:
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
+	_fuses = []
 	world_name = str(meta.get("name", dir_name))
 	seed_value = int(meta.get("seed", 12345))
 	_set_cheats(bool(meta.get("cheats", true)))
@@ -733,6 +788,7 @@ func _quit_to_title() -> void:
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
+	_fuses = []
 	_enter_title()
 
 
@@ -748,7 +804,13 @@ func _respawn() -> void:
 
 func _on_died() -> void:
 	mode = Mode.DEATH
+	# record where you fell: the death screen and the chat both say it, so a death in a
+	# cave still leaves a trail back to your things
+	var p: Vector3 = player.global_position
+	var where := I18n.tf("You died at %.0f %.0f %.0f.", [p.x, p.y, p.z])
+	hud.chat_print(where, Color(1.0, 0.45, 0.40))
 	ui.open_screen("death")
+	ui.set_death_info(where)
 	player.set_input_enabled(false)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	hud.flash_hurt()
@@ -1392,6 +1454,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_close_inventory()
 				else:
 					_open_inventory()
+			elif k == KEY_L:
+				# the progress screen, Minecraft's key for it. Nothing else may be open,
+				# or L would stack a menu on top of a crafting grid
+				if not (_inv_open or _enchant_open or _trade_open or _chat_open):
+					_pause()
+					ui.open_advancements()
 			elif k == KEY_F5:
 				player.cycle_camera()
 				hud.toast(I18n.tf("Camera: %s", [I18n.t(player.camera_mode_name())]))
@@ -1434,7 +1502,9 @@ func _grow_crops(delta: float) -> void:
 	for i in 16:
 		var pos: Vector3i = keys[randi() % keys.size()]
 		var id: int = world.get_block(pos.x, pos.y, pos.z)
-		if id == Blocks.WHEAT_0 or id == Blocks.WHEAT_1 or id == Blocks.WHEAT_2:
+		if id == Blocks.WHEAT_0 or id == Blocks.WHEAT_1 or id == Blocks.WHEAT_2 \
+				or (id >= Blocks.CARROT_0 and id <= Blocks.CARROT_2) \
+				or (id >= Blocks.POTATO_0 and id <= Blocks.POTATO_2):
 			if randf() < 0.35:
 				world.set_block(pos.x, pos.y, pos.z, id + 1)
 
@@ -1480,12 +1550,18 @@ func _process(delta: float) -> void:
 		_sync_signs(delta)
 		_update_weather(delta)
 		_update_xp_orbs(delta)
+		_tick_fuses(delta)
 		mobs.update(player.global_position, delta, sky.is_night())
 		projectiles.update(player.global_position, delta)
 		item_entities.update(player.global_position, delta)
 		particles.update(delta)
 		_update_selection()
 		_update_crack()
+		# night vision: the environment brightens while the potion lasts
+		var want_nv: bool = player.has_effect("night")
+		if want_nv != _night_vision:
+			_night_vision = want_nv
+			sky.set_night_vision(want_nv)
 		# The overlay costs a raycast, a biome lookup, several Performance monitors and
 		# a font measurement pass per line. Skip all of it on the frames it is off.
 		if hud.debug_visible:
@@ -1528,6 +1604,7 @@ func _debug_text() -> String:
 		"Chunks %d   Edits %d   Lights %d   Mobs %d   Drops %d" % [
 			world.loaded_chunks(), world.edit_count(), world.torches.size(), mobs.count(),
 			item_entities.count()],
+		"Milestones %d/%d" % [Advancements.done_count(), Advancements.total()],
 		"Mode %s   RD %d   Seed %d" % [
 			"creative" if player.creative else "survival", world.render_distance, seed_value],
 		"Draw calls %d   Objects %d   VRAM %.0f MB" % [
@@ -2523,6 +2600,21 @@ func _run_selftest() -> void:
 	_check("every milestone is listed under a real group", bad_group == 0,
 		"%d of %d ungrouped" % [bad_group, Advancements.total()])
 	_check("every milestone has a drawable icon", bad_icon == 0, "%d missing" % bad_icon)
+	# the console surface for the system, driven through the same entry point the chat
+	# box submits to
+	Commands.cheats_enabled = true
+	Commands.level = Commands.LEVEL_ADMIN
+	Advancements.reset()
+	Commands.run_command("advancement grant wood_pick")
+	_check("the console can grant a milestone", Advancements.is_done("wood_pick"))
+	Commands.run_command("advancement revoke wood_pick")
+	_check("the console can take a milestone back", not Advancements.is_done("wood_pick"))
+	Commands.run_command("advancement grant all")
+	_check("the console can grant every milestone",
+		Advancements.done_count() == Advancements.total(),
+		"%d of %d" % [Advancements.done_count(), Advancements.total()])
+	Commands.run_command("advancement revoke all")
+	_check("the console can clear them all again", Advancements.done_count() == 0)
 
 	# The save did its job several checks ago; take it away again at the very end.
 	# Without this every run leaves another "Selftest_<timestamp>" world behind, and

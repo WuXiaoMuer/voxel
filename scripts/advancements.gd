@@ -138,6 +138,30 @@ func _build() -> void:
 			"Craft a lamp.", ["craft", "place"], {"want": [Blocks.LAMP]}),
 		_d("piston", "industry", Blocks.PISTON, "Moving Parts",
 			"Craft a piston.", ["craft", "place"], {"want": [Blocks.PISTON]}),
+
+		# ---- the husbandry, fishing, explosives and potion content
+		_d("breed", "farm", Blocks.ITEM_CARROT, "Two by Two",
+			"Breed a pair of animals with the food they eat.", "breed"),
+		_d("carrot", "farm", Blocks.ITEM_CARROT, "Root Crop",
+			"Harvest a carrot.", "obtain", {"want": [Blocks.ITEM_CARROT]}),
+		_d("potato", "farm", Blocks.ITEM_POTATO, "Underground Harvest",
+			"Dig up a potato.", "obtain", {"want": [Blocks.ITEM_POTATO]}),
+		_d("baked", "farm", Blocks.ITEM_BAKED_POTATO, "Hot Potato",
+			"Bake a potato in a furnace.", ["obtain", "smelt"],
+			{"want": [Blocks.ITEM_BAKED_POTATO]}),
+		_d("fish", "farm", Blocks.ITEM_FISH_RAW, "Gone Fishing",
+			"Catch or cook a fish.", ["obtain", "smelt"],
+			{"want": [Blocks.ITEM_FISH_RAW, Blocks.ITEM_FISH_COOKED]}),
+		_d("flint", "adventure", Blocks.ITEM_FLINT, "Spark",
+			"Pick a shard of flint out of gravel.", "obtain", {"want": [Blocks.ITEM_FLINT]}),
+		_d("wolf", "adventure", Blocks.ITEM_BONE, "Best Friend",
+			"Tame a wolf with a bone.", "tame"),
+		_d("boom", "industry", Blocks.TNT, "Boom!",
+			"Light a block of TNT and let it blow.", "tnt"),
+		_d("alchemist", "industry", Blocks.ITEM_POTION_NIGHT, "Alchemist",
+			"Brew a potion and drink it.", "potion"),
+		_d("dispenser", "industry", Blocks.DISPENSER, "Automatic",
+			"Craft a dispenser.", ["craft", "place"], {"want": [Blocks.DISPENSER]}),
 	]
 
 	_by_id = {}
@@ -200,6 +224,26 @@ func grant(id: String) -> bool:
 	if not _by_id.has(id) or _done.has(id):
 		return false
 	_grant(id)
+	return true
+
+
+## Grants everything not yet earned and returns how many were new. Backs the console's
+## `/advancement grant all`.
+func grant_all() -> int:
+	var n := 0
+	for d in _defs:
+		var id: String = d["id"]
+		if not _done.has(id):
+			_grant(id)
+			n += 1
+	return n
+
+
+## Takes an advancement back, for the console. True when it had been earned.
+func revoke(id: String) -> bool:
+	if not _done.has(id):
+		return false
+	_done.erase(id)
 	return true
 
 

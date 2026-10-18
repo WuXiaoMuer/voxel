@@ -7,7 +7,7 @@ const PAD := 2            # gutter used to keep mipmaps from bleeding
 const CELL := TILE + PAD * 2
 const COLS := 8
 const ROWS := 16
-const TILES := 101
+const TILES := 113
 
 # ---------------------------------------------------------------- block ids
 const AIR := 0
@@ -148,6 +148,20 @@ const BIRCH_PLANKS := 105
 ## and one for the head, because the head is the end the pillow sits at and that is not
 ## derivable from the foot's id.
 const BED_HEAD := 106
+# ---------------------------------------------------------------- crops, explosives
+# Carrots and potatoes are the second and third crops: four growth stages each, exactly
+# like wheat, so the farmland/growth machinery is shared rather than duplicated.
+const CARROT_0 := 107
+const CARROT_1 := 108
+const CARROT_2 := 109
+const CARROT_3 := 110
+const POTATO_0 := 111
+const POTATO_1 := 112
+const POTATO_2 := 113
+const POTATO_3 := 114
+# TNT and a dispenser: the two powered-ish blocks the explosives bundle adds.
+const TNT := 115
+const DISPENSER := 116
 
 # ---------------------------------------------------------------- item ids
 const ITEM_STICK := 256
@@ -240,6 +254,28 @@ const ITEM_ENDER_PEARL := 332
 # only way to get one is to trade with a villager, which is the whole point of the
 # trade screen -- it is a sink for wheat, coal and stone, and the source of emeralds.
 const ITEM_EMERALD := 333
+
+# ---------------------------------------------------------------- husbandry, fishing,
+# explosives and brewing
+const ITEM_CARROT := 334
+const ITEM_POTATO := 335
+const ITEM_BAKED_POTATO := 336
+const ITEM_SHEARS := 337
+const ITEM_FLINT := 338
+const ITEM_FLINT_STEEL := 339
+const ITEM_FISHING_ROD := 340
+const ITEM_FISH_RAW := 341
+const ITEM_FISH_COOKED := 342
+# One id per potion, rather than a type hidden in the stack: an inventory slot is just an
+# integer, so a distinct id is what lets the icon, the name and the effect all agree.
+const ITEM_POTION_SWIFTNESS := 343
+const ITEM_POTION_REGEN := 344
+const ITEM_POTION_STRENGTH := 345
+const ITEM_POTION_NIGHT := 346
+const ITEM_POTION_SPLASH_SWIFTNESS := 347
+const ITEM_POTION_SPLASH_REGEN := 348
+const ITEM_POTION_SPLASH_STRENGTH := 349
+const ITEM_POTION_SPLASH_NIGHT := 350
 
 # ---------------------------------------------------------------- tile ids
 const T_GRASS_TOP := 0
@@ -338,6 +374,20 @@ const T_BIRCH_PLANKS := 98
 # pillow round the sides of the mattress.
 const T_BED_SIDE := 99
 const T_BED_PILLOW := 100
+# ---------------------------------------------------------------- crops, explosives and
+# the new stations (ids 101+)
+const T_CARROT_0 := 101
+const T_CARROT_1 := 102
+const T_CARROT_2 := 103
+const T_CARROT_3 := 104
+const T_POTATO_0 := 105
+const T_POTATO_1 := 106
+const T_POTATO_2 := 107
+const T_POTATO_3 := 108
+const T_TNT_SIDE := 109
+const T_TNT_TOP := 110
+const T_DISPENSER_SIDE := 111
+const T_DISPENSER_FRONT := 112
 
 # The sixteen dye colours, in Minecraft's order. `WOOL_NAMES[i]` names `WOOL_0 + i`,
 # `ITEM_DYE_0 + i`, `CARPET_0 + i` and `T_WOOL_0 + i` alike; `WOOL_COLORS[i]` is the
@@ -539,6 +589,23 @@ func _build_defs() -> void:
 	_def(BED_HEAD, "Bed", T_BED, K_BED, 0.2, BED)
 	_def(ENCHANTING_TABLE, "Enchanting Table", [T_ENCHANT, T_OBSIDIAN, T_ENCHANT], K_CUBE, 3.5, ENCHANTING_TABLE)
 
+	# ---- the second and third crops. Crossed billboards like wheat, four stages each;
+	# the ripe stage drops its vegetable, and replanting a carrot or a potato is what
+	# keeps a field going (there are no seeds to keep, unlike wheat).
+	_def(CARROT_0, "Carrot Crop", T_CARROT_0, K_CROSS, 0.05, -1)
+	_def(CARROT_1, "Carrot Crop", T_CARROT_1, K_CROSS, 0.05, -1)
+	_def(CARROT_2, "Carrot Crop", T_CARROT_2, K_CROSS, 0.05, -1)
+	_def(CARROT_3, "Carrots", T_CARROT_3, K_CROSS, 0.05, ITEM_CARROT)
+	_def(POTATO_0, "Potato Crop", T_POTATO_0, K_CROSS, 0.05, -1)
+	_def(POTATO_1, "Potato Crop", T_POTATO_1, K_CROSS, 0.05, -1)
+	_def(POTATO_2, "Potato Crop", T_POTATO_2, K_CROSS, 0.05, -1)
+	_def(POTATO_3, "Potatoes", T_POTATO_3, K_CROSS, 0.05, ITEM_POTATO)
+
+	# ---- the explosives bundle: TNT (a block that goes off) and a dispenser (a block
+	# that launches an arrow)
+	_def(TNT, "TNT", [T_TNT_TOP, T_TNT_SIDE, T_TNT_SIDE], K_CUBE, 0.5, TNT)
+	_def(DISPENSER, "Dispenser", [T_DISPENSER_SIDE, T_DISPENSER_SIDE, T_DISPENSER_FRONT], K_CUBE, 3.5, DISPENSER)
+
 	# non-block items share the same id space so an inventory slot is just an int
 	names[ITEM_STICK] = "Stick"
 	names[ITEM_COAL] = "Coal"
@@ -609,6 +676,24 @@ func _build_defs() -> void:
 	names[ITEM_SLIME_BALL] = "Slimeball"
 	names[ITEM_ENDER_PEARL] = "Ender Pearl"
 	names[ITEM_EMERALD] = "Emerald"
+	# husbandry, fishing, explosives and brewing
+	names[ITEM_CARROT] = "Carrot"
+	names[ITEM_POTATO] = "Potato"
+	names[ITEM_BAKED_POTATO] = "Baked Potato"
+	names[ITEM_SHEARS] = "Shears"
+	names[ITEM_FLINT] = "Flint"
+	names[ITEM_FLINT_STEEL] = "Flint and Steel"
+	names[ITEM_FISHING_ROD] = "Fishing Rod"
+	names[ITEM_FISH_RAW] = "Raw Fish"
+	names[ITEM_FISH_COOKED] = "Cooked Fish"
+	names[ITEM_POTION_SWIFTNESS] = "Potion of Swiftness"
+	names[ITEM_POTION_REGEN] = "Potion of Regeneration"
+	names[ITEM_POTION_STRENGTH] = "Potion of Strength"
+	names[ITEM_POTION_NIGHT] = "Potion of Night Vision"
+	names[ITEM_POTION_SPLASH_SWIFTNESS] = "Splash Potion of Swiftness"
+	names[ITEM_POTION_SPLASH_REGEN] = "Splash Potion of Regeneration"
+	names[ITEM_POTION_SPLASH_STRENGTH] = "Splash Potion of Strength"
+	names[ITEM_POTION_SPLASH_NIGHT] = "Splash Potion of Night Vision"
 
 	for id in range(0, 512):
 		var d = defs[id]
@@ -765,6 +850,16 @@ func lit_tile(id: int, on: bool) -> int:
 ## Hunger restored by eating this item, 0 when it is not food.
 func food_value(id: int) -> int:
 	match id:
+		ITEM_CARROT:
+			return 3
+		ITEM_POTATO:
+			return 1
+		ITEM_BAKED_POTATO:
+			return 5
+		ITEM_FISH_RAW:
+			return 2
+		ITEM_FISH_COOKED:
+			return 5
 		ITEM_APPLE:
 			return 4
 		ITEM_BREAD:
@@ -1460,6 +1555,41 @@ func _tile_image(id: int) -> Image:
 			img = _wheat_tile(2, 62)
 		T_WHEAT_3:
 			img = _wheat_tile(3, 63)
+		# ---- the other two crops: the same crossed stems as wheat, with a visible root
+		# (orange for carrots, pale for potatoes) once they are ripe enough to harvest
+		T_CARROT_0:
+			_crop_tile(img, 0, 101, Color(0.94, 0.54, 0.16))
+		T_CARROT_1:
+			_crop_tile(img, 1, 102, Color(0.94, 0.54, 0.16))
+		T_CARROT_2:
+			_crop_tile(img, 2, 103, Color(0.94, 0.54, 0.16))
+		T_CARROT_3:
+			_crop_tile(img, 3, 104, Color(0.96, 0.58, 0.18))
+		T_POTATO_0:
+			_crop_tile(img, 0, 105, Color(0.80, 0.68, 0.44))
+		T_POTATO_1:
+			_crop_tile(img, 1, 106, Color(0.80, 0.68, 0.44))
+		T_POTATO_2:
+			_crop_tile(img, 2, 107, Color(0.80, 0.68, 0.44))
+		T_POTATO_3:
+			_crop_tile(img, 3, 108, Color(0.84, 0.72, 0.48))
+		# ---- the stations
+		T_TNT_SIDE:
+			_tnt_side(img)
+		T_TNT_TOP:
+			_flat(img, Color(0.70, 0.20, 0.18), 0.07, 110)
+			for x in TILE:
+				img.set_pixel(x, 0, Color(0.34, 0.12, 0.10))
+				img.set_pixel(x, TILE - 1, Color(0.34, 0.12, 0.10))
+			_blob(img, 8, 8, 2, Color(0.34, 0.28, 0.20))
+		T_DISPENSER_SIDE:
+			_flat(img, Color(0.42, 0.42, 0.43), 0.08, 111)
+			for i in 6:
+				_blob(img, r.randi_range(1, 14), r.randi_range(1, 14), 1, Color(0.36, 0.36, 0.37))
+		T_DISPENSER_FRONT:
+			_flat(img, Color(0.42, 0.42, 0.43), 0.08, 112)
+			_blob(img, 8, 8, 4, Color(0.20, 0.20, 0.21))
+			_blob(img, 8, 8, 3, Color(0.06, 0.06, 0.07))
 		# ---- building shapes
 		T_TRAPDOOR:
 			# a slatted wooden hatch: three boards with dark gaps between them
@@ -1597,6 +1727,40 @@ func _wheat_tile(stage: int, seed: int) -> Image:
 			img.set_pixel(cx - 1, TILE - h, col)
 			img.set_pixel(cx, TILE - h - 1, col)
 	return img
+
+
+## A stem crop, drawn exactly like wheat but with a root colour of its own: three
+## uprights that lengthen with each stage, and the root showing at the ripe stages.
+func _crop_tile(img: Image, stage: int, seed: int, root: Color) -> void:
+	var h := 4 + stage * 3
+	var stem := Color(0.36, 0.58, 0.20)
+	for cx in [4, 8, 12]:
+		for y in range(TILE - 1, TILE - 1 - h, -1):
+			img.set_pixel(cx, y, stem)
+		if stage >= 2:
+			img.set_pixel(cx - 1, TILE - h, stem)
+			img.set_pixel(cx, TILE - h - 1, stem)
+	if stage >= 3:
+		var rr := _rng(seed)
+		for cx2 in [4, 8, 12]:
+			img.set_pixel(cx2, TILE - 2, root)
+			img.set_pixel(cx2, TILE - 3, root)
+		_blob(img, rr.randi_range(3, 12), TILE - 2, 1, root.lightened(0.12))
+
+
+## TNT: a red block with a pale band across the middle, so it reads as "the block that
+## blows up" from the side rather than as another red cube.
+func _tnt_side(img: Image) -> void:
+	_flat(img, Color(0.70, 0.20, 0.18), 0.07, 110)
+	for y in range(5, 11):
+		for x in range(1, TILE - 1):
+			img.set_pixel(x, y, Color(0.88, 0.86, 0.80))
+	for x in TILE:
+		img.set_pixel(x, 4, Color(0.34, 0.12, 0.10))
+		img.set_pixel(x, 11, Color(0.34, 0.12, 0.10))
+	for x in range(5, 11):
+		if x % 2 == 0:
+			img.set_pixel(x, 8, Color(0.30, 0.12, 0.10))
 
 
 ## A wire laid on the floor: a copper conductor inside a dark sheath, drawn as a cross

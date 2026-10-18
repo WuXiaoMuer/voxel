@@ -197,6 +197,12 @@ func _register_all() -> void:
 		LEVEL_OP, _cmd_fog)
 	register("rd", "/rd <chunks>", "Set the render distance for this world.",
 		LEVEL_OP, _cmd_rd, ["renderdistance"])
+	register("progress", "/progress [milestone]",
+		"List how many milestones you have earned, or detail one.",
+		LEVEL_ANY, _cmd_progress, ["advancements"])
+	register("advancement", "/advancement <grant|revoke> <id|all>",
+		"Grant or take back a milestone, for testing or for a fresh goal.",
+		LEVEL_OP, _cmd_advancement)
 
 
 func _cmd_help(args: Array) -> void:
@@ -380,3 +386,82 @@ func _cmd_rd(args: Array) -> void:
 	world.request_rebuild()
 	sky.set_render_distance(rd)
 	output.emit(I18n.tf("Render distance set to %d chunks.", [rd]))
+
+
+# ================================================================ advancements
+## `/progress` prints the tally per group, or details one milestone. Read-only, so it is
+## open to everyone -- knowing what is left to do is the point of the system.
+func _cmd_progress(args: Array) -> void:
+	if args.size() > 0:
+		var id := _find_advancement(str(args[0]))
+		if id == "":
+			output.emit(I18n.tf("No milestone named %s.", [str(args[0])]))
+			return
+		var d: Dictionary = Advancements.def_of(id)
+		var status := I18n.t("earned") if Advancements.is_done(id) else I18n.t("not yet")
+		var tail := ""
+		var goal := int(d.get("goal", 1))
+		if goal > 1:
+			tail = "  (%d/%d)" % [Advancements.progress_of(id), goal]
+		output.emit("%s  -  %s  [%s]%s" % [I18n.t(str(d["name"])),
+			I18n.t(str(d["desc"])), status, tail])
+		return
+	output.emit(I18n.tf("Progress: %d of %d milestones earned.",
+		[Advancements.done_count(), Advancements.total()]))
+	for g in Advancements.GROUPS:
+		var defs: Array = Advancements.group_defs(str(g["id"]))
+		if defs.is_empty():
+			continue
+		var n := 0
+		for d2 in defs:
+			if Advancements.is_done(str(d2["id"])):
+				n += 1
+		output.emit("  %s   %d/%d" % [I18n.t(str(g["name"])), n, defs.size()])
+
+
+## `/advancement grant|revoke <id|all>`. Granting fires the unlock banner like any other
+## milestone, which is exactly what a tester wants to see.
+func _cmd_advancement(args: Array) -> void:
+	if args.size() < 2:
+		output.emit("/advancement <grant|revoke> <id|all>")
+		return
+	var op := str(args[0]).to_lower()
+	var target := str(args[1])
+	if op != "grant" and op != "revoke":
+		output.emit("/advancement <grant|revoke> <id|all>")
+		return
+	if target.to_lower() == "all":
+		if op == "grant":
+			output.emit(I18n.tf("Granted every milestone (%d new).",
+				[Advancements.grant_all()]))
+		else:
+			Advancements.reset()
+			output.emit(I18n.t("Took back every milestone."))
+		return
+	var id := _find_advancement(target)
+	if id == "":
+		output.emit(I18n.tf("No milestone named %s.", [target]))
+		return
+	var nm := I18n.t(str(Advancements.def_of(id)["name"]))
+	if op == "grant":
+		if Advancements.grant(id):
+			output.emit(I18n.tf("Granted %s.", [nm]))
+		else:
+			output.emit(I18n.tf("%s is already earned.", [nm]))
+	elif Advancements.revoke(id):
+		output.emit(I18n.tf("Took back %s.", [nm]))
+	else:
+		output.emit(I18n.tf("%s was not earned.", [nm]))
+
+
+## Resolves a milestone by its id or its name (English source or translated), case- and
+## space-insensitive, or returns "".
+func _find_advancement(q: String) -> String:
+	var key := _key_of(q)
+	for d in Advancements.defs():
+		var id := str(d["id"])
+		if id.to_lower() == q.to_lower():
+			return id
+		if _key_of(str(d["name"])) == key or _key_of(I18n.t(str(d["name"]))) == key:
+			return id
+	return ""

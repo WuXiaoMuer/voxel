@@ -5,6 +5,10 @@ const DAY_LENGTH := 900.0     # seconds for a full cycle
 
 var world_env: WorldEnvironment
 var env: Environment
+## Night vision brightens the exposure relative to the render pack's own value, captured
+## when the effect starts so it can be put back exactly.
+var night_vision := false
+var _base_exposure := 1.05
 var sky_mat: ProceduralSkyMaterial
 var sun: DirectionalLight3D
 var moon: DirectionalLight3D
@@ -78,6 +82,19 @@ func set_render_distance(rd: int) -> void:
 	_auto_fog_end = maxf(56.0, float(rd) * 16.0 - 6.0)
 	_auto_fog_begin = maxf(22.0, _auto_fog_end * 0.45)
 	apply_fog()
+
+
+## Night vision brightens the exposure while a potion of night vision is active, and puts
+## the render pack's own value back when it ends.
+func set_night_vision(on: bool) -> void:
+	if env == null or on == night_vision:
+		return
+	night_vision = on
+	if on:
+		_base_exposure = env.tonemap_exposure
+		env.tonemap_exposure = _base_exposure * 1.9
+	else:
+		env.tonemap_exposure = _base_exposure
 
 
 ## The user-facing half of the fog: `fog_scale` stretches how far you can see

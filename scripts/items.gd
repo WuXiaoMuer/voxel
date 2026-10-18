@@ -135,6 +135,33 @@ func _ready() -> void:
 		Blocks.ITEM_ENDER_PEARL: "A pearl from an Enderman.",
 		Blocks.ITEM_EMERALD: "The villagers' coin. Earn it by trading, spend it on goods.",
 		Blocks.ENCHANTING_TABLE: "Spend levels to enchant the tool or armour you hold.",
+		Blocks.CARROT_0: "Growing carrots. Ripe when the root shows at the soil.",
+		Blocks.CARROT_1: "Growing carrots. Ripe when the root shows at the soil.",
+		Blocks.CARROT_2: "Growing carrots. Ripe when the root shows at the soil.",
+		Blocks.CARROT_3: "Ripe carrots. Harvest them, then plant one to keep the field going.",
+		Blocks.POTATO_0: "Growing potatoes. Ripe when the tubers show at the soil.",
+		Blocks.POTATO_1: "Growing potatoes. Ripe when the tubers show at the soil.",
+		Blocks.POTATO_2: "Growing potatoes. Ripe when the tubers show at the soil.",
+		Blocks.POTATO_3: "Ripe potatoes. Harvest them, then plant one to keep the field going.",
+		Blocks.TNT: "An explosive block. Light the fuse with flint and steel.",
+		Blocks.DISPENSER: "Right-click it holding an arrow to launch one forward.",
+		Blocks.ITEM_CARROT: "Food. Plant one on farmland to grow more.",
+		Blocks.ITEM_POTATO: "Food, and better baked. Plant one to grow more.",
+		Blocks.ITEM_BAKED_POTATO: "A baked potato. The filling meal of the root cellar.",
+		Blocks.ITEM_SHEARS: "Right-click a sheep to cut its wool; the fleece grows back.",
+		Blocks.ITEM_FLINT: "A hard shard knocked out of gravel. Half of flint and steel.",
+		Blocks.ITEM_FLINT_STEEL: "Right-click a TNT block to light its fuse.",
+		Blocks.ITEM_FISHING_ROD: "Right-click water to cast; right-click again to reel in.",
+		Blocks.ITEM_FISH_RAW: "Raw fish. Cook it in a furnace before eating.",
+		Blocks.ITEM_FISH_COOKED: "Cooked fish. A light meal that stacks well.",
+		Blocks.ITEM_POTION_SWIFTNESS: "Drink to move faster for about two minutes.",
+		Blocks.ITEM_POTION_REGEN: "Drink to heal steadily for about half a minute.",
+		Blocks.ITEM_POTION_STRENGTH: "Drink to hit much harder for about two minutes.",
+		Blocks.ITEM_POTION_NIGHT: "Drink to see in the dark for about three minutes.",
+		Blocks.ITEM_POTION_SPLASH_SWIFTNESS: "Throw it to speed up everything close by.",
+		Blocks.ITEM_POTION_SPLASH_REGEN: "Throw it to heal everything close by.",
+		Blocks.ITEM_POTION_SPLASH_STRENGTH: "Throw it to strengthen everything close by.",
+		Blocks.ITEM_POTION_SPLASH_NIGHT: "Throw it to light the dark around everything close by.",
 	}
 
 
@@ -363,6 +390,22 @@ func _item_icon(id: int, size: int) -> Image:
 	img.fill(Color(0, 0, 0, 0))
 	var k := float(size) / 16.0
 
+	# these tools have shapes specific enough to draw by hand rather than through the
+	# generic pick/axe/sword outline
+	if id == Blocks.ITEM_SHEARS:
+		_shears_icon(img, k)
+		return img
+	if id == Blocks.ITEM_FLINT_STEEL:
+		_flint_steel_icon(img, k)
+		return img
+	if id == Blocks.ITEM_FISHING_ROD:
+		_fishing_rod_icon(img, k)
+		return img
+	# every potion shares one flask; only the liquid, and whether it splashes, differ
+	if id >= Blocks.ITEM_POTION_SWIFTNESS and id <= Blocks.ITEM_POTION_SPLASH_NIGHT:
+		_potion_icon(img, k, _potion_color(id), id >= Blocks.ITEM_POTION_SPLASH_SWIFTNESS)
+		return img
+
 	# tools and armour are drawn parametrically from their kind/slot and material tier
 	if Gear.is_tool(id):
 		_tool_icon(img, k, Gear.tool_kind(id), _tool_head(id), _tool_dark(id))
@@ -485,6 +528,29 @@ func _item_icon(id: int, size: int) -> Image:
 			_gem(img, k, Color(0.35, 0.82, 0.74), Color(0.12, 0.44, 0.46))
 		Blocks.ITEM_EMERALD:
 			_gem(img, k, Color(0.24, 0.86, 0.40), Color(0.05, 0.52, 0.24))
+		Blocks.ITEM_CARROT:
+			# a tapered orange root under a tuft of leaves
+			for y in range(4, 14):
+				var half := maxi(1, 4 - int((y - 4) * 0.35))
+				for x in range(8 - half, 8 + half):
+					_px(img, x, y, k, Color(0.94, 0.52, 0.14) if x > 7 else Color(0.80, 0.40, 0.10))
+			_px(img, 6, 3, k, Color(0.34, 0.62, 0.22))
+			_px(img, 8, 2, k, Color(0.34, 0.62, 0.22))
+			_px(img, 10, 3, k, Color(0.34, 0.62, 0.22))
+		Blocks.ITEM_POTATO:
+			_blob_px(img, 8, 9, 4, k, Color(0.80, 0.68, 0.44))
+			_blob_px(img, 7, 8, 2, k, Color(0.88, 0.78, 0.54))
+			_px(img, 6, 12, k, Color(0.60, 0.48, 0.28))
+			_px(img, 10, 7, k, Color(0.64, 0.52, 0.32))
+		Blocks.ITEM_BAKED_POTATO:
+			_blob_px(img, 8, 9, 4, k, Color(0.62, 0.44, 0.24))
+			_blob_px(img, 7, 8, 2, k, Color(0.72, 0.54, 0.32))
+			_px(img, 6, 12, k, Color(0.44, 0.30, 0.16))
+			_px(img, 10, 7, k, Color(0.50, 0.36, 0.20))
+		Blocks.ITEM_FISH_RAW:
+			_fish_icon(img, k, Color(0.70, 0.78, 0.86))
+		Blocks.ITEM_FISH_COOKED:
+			_fish_icon(img, k, Color(0.74, 0.52, 0.26))
 		_:
 			_blob_px(img, 8, 8, 4, k, Color(0.6, 0.6, 0.65))
 	return img
@@ -509,6 +575,87 @@ func _bucket_icon(img: Image, k: int, fill: Color) -> void:
 	for x in range(4, 12):
 		if x < 6 or x > 9:
 			_px(img, x, 3, k, dark)
+
+
+## Shears: two grey blades meeting at a pivot, with the handles below it.
+func _shears_icon(img: Image, k: float) -> void:
+	var steel := Color(0.78, 0.80, 0.84)
+	var dark := Color(0.46, 0.48, 0.52)
+	for i in 7:
+		_px(img, 4 + i, 3 + i, k, steel)
+		_px(img, 11 - i, 3 + i, k, steel)
+	_blob_px(img, 8, 10, 2, k, dark)
+	_px(img, 6, 12, k, dark)
+	_px(img, 7, 13, k, dark)
+	_px(img, 10, 12, k, dark)
+	_px(img, 9, 13, k, dark)
+
+
+## Flint and steel: a steel striker over a dark flint shard.
+func _flint_steel_icon(img: Image, k: float) -> void:
+	var steel := Color(0.62, 0.64, 0.68)
+	for x in range(3, 11):
+		_px(img, x, 4, k, steel)
+		_px(img, x, 5, k, steel.darkened(0.2))
+	for y in range(6, 12):
+		_px(img, 3, y, k, steel.darkened(0.15))
+	_blob_px(img, 9, 10, 4, k, Color(0.30, 0.30, 0.34))
+	_blob_px(img, 8, 9, 2, k, Color(0.44, 0.44, 0.48))
+
+
+## A fishing rod: a long rod with a line down from its tip and a small hook.
+func _fishing_rod_icon(img: Image, k: float) -> void:
+	for i in 12:
+		_px(img, 3 + i, 13 - i, k, Color(0.42, 0.28, 0.14))
+		_px(img, 4 + i, 13 - i, k, Color(0.54, 0.37, 0.19))
+	for y in range(3, 12):
+		_px(img, 14, y, k, Color(0.86, 0.86, 0.88))
+	_px(img, 13, 12, k, Color(0.70, 0.70, 0.74))
+	_px(img, 13, 13, k, Color(0.55, 0.55, 0.60))
+
+
+## A fish: a rounded body with a tail fin and one dark eye.
+func _fish_icon(img: Image, k: float, body: Color) -> void:
+	_blob_px(img, 8, 8, 4, k, body)
+	_blob_px(img, 7, 7, 2, k, body.lightened(0.16))
+	for dy in [-1, 0, 1]:
+		_px(img, 3, 8 + dy, k, body.darkened(0.18))
+	_px(img, 10, 7, k, Color(0.10, 0.10, 0.12))
+
+
+## The liquid colour of a potion, by id.
+func _potion_color(id: int) -> Color:
+	match id:
+		Blocks.ITEM_POTION_SWIFTNESS, Blocks.ITEM_POTION_SPLASH_SWIFTNESS:
+			return Color(0.36, 0.72, 0.96)
+		Blocks.ITEM_POTION_REGEN, Blocks.ITEM_POTION_SPLASH_REGEN:
+			return Color(0.92, 0.38, 0.62)
+		Blocks.ITEM_POTION_STRENGTH, Blocks.ITEM_POTION_SPLASH_STRENGTH:
+			return Color(0.86, 0.20, 0.22)
+	return Color(0.28, 0.26, 0.64)
+
+
+## A potion flask: a corked bottle with liquid in it. A splash variant scatters a few
+## droplets off the neck, so the two are told apart at a glance in the hotbar.
+func _potion_icon(img: Image, k: float, liquid: Color, splash: bool) -> void:
+	var glass := Color(0.80, 0.84, 0.88)
+	for y in range(5, 8):
+		for x in range(7, 10):
+			_px(img, x, y, k, glass)
+	for y in range(8, 14):
+		var half := 2 + int((y - 8) * 0.7)
+		for x in range(8 - half, 8 + half):
+			_px(img, x, y, k, glass)
+	for y in range(9, 13):
+		var half2 := 1 + int((y - 8) * 0.7)
+		for x in range(8 - half2, 8 + half2):
+			_px(img, x, y, k, liquid)
+	for x in range(7, 10):
+		_px(img, x, 4, k, Color(0.56, 0.38, 0.20))
+	if splash:
+		_px(img, 5, 6, k, liquid)
+		_px(img, 11, 6, k, liquid)
+		_px(img, 4, 10, k, liquid)
 
 
 ## A small cloth pouch of dye, tied at the neck, in the colour it dyes wool.

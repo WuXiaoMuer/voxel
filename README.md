@@ -59,6 +59,7 @@ template is used, since that is all a release build needs.
 | **Middle mouse** | Pick the block you are looking at |
 | `1` … `9` / wheel | Select a hotbar slot |
 | `E` | Inventory, crafting and the block palette |
+| `L` | Advancements / progress screen |
 | `Q` | Drop one item |
 | `T` | Open the chat box |
 | `/` | Open the chat box already in command mode |
@@ -109,9 +110,51 @@ regenerates when you are nearly full, and an empty bar slowly starves you. Apple
 fall out of leaves and bread is in the creative palette; hold one and right-click
 to eat.
 
+**Husbandry**
+
+Right-click an animal while holding the food it eats and it takes it: wheat for cows
+and sheep, a carrot or a potato for a pig, seeds for a chicken. Feed two of the same
+kind and they pair up and produce a baby, which is born small and grows up over a
+minute. Shears — two iron in a diagonal — cut a sheep's fleece for one to three wool
+without killing it, and the wool grows back after a while.
+
+**Root crops**
+
+Carrots and potatoes join wheat. Take one from tall grass, a village or a drop, then
+plant it on farmland the same way: right-click the tilled soil with it in hand. They
+ripen through four stages like wheat, and harvesting a ripe one drops the vegetable
+and leaves the soil ready to plant again. A potato bakes in a furnace; so does a fish.
+
+**Fishing**
+
+The rod is three sticks in a diagonal. Right-click open water to cast the bobber, wait
+for a bite, then right-click again to reel in a raw fish. Reeling before the bite just
+brings the line back, and the line snaps if you walk too far away.
+
+**Wolves**
+
+Wolves live in the woods. Feed one a bone and it may become yours; a tamed wolf follows
+you, attacks the hostile mobs it finds, and sits or stands up when you right-click it
+with an empty hand. Feed it meat to heal it.
+
+**Explosives**
+
+Gravel sometimes hides a shard of flint, and flint plus an iron ingot makes flint and
+steel. Right-click a block of TNT to light its fuse; it burns for a couple of seconds
+and then goes off in the same blast a creeper makes. A dispenser, handed an arrow,
+launches it along your aim.
+
+**Potions**
+
+Four potions are brewed in the crafting grid from a pane of glass and one reagent: a
+feather for Swiftness, a slimeball for Regeneration, a bone for Strength and glowstone
+for Night Vision. Each is drunk for a real effect — a faster walk, steady healing,
+harder hits, or a brightened world. Add gunpowder and it becomes a splash potion,
+thrown rather than drunk, that affects everything near where it lands.
+
 **Advancements**
 
-Forty milestones track how far you have come, in the spirit of Minecraft's
+Fifty milestones track how far you have come, in the spirit of Minecraft's
 advancements: break your first block, get wood, benchmark a crafting table, reach
 the Stone Age, smelt iron, find a diamond, trade with a villager, enchant a tool,
 draw your first copper wire. They are grouped into Getting Started, Mining, Building,
@@ -121,9 +164,10 @@ at the top of the screen with its icon, "Advancement Made!" and its name.
 Two of them are counted goals rather than a single event — break 100 blocks to become
 a Miner, place 200 to become an Architect — and two fire on a value rather than an
 event: reaching experience level 10 is *Experienced*. The full list, with what each
-one asks for and how many of the forty you have earned, is on the **Advancements**
+one asks for and how many of the fifty you have earned, is on the **Advancements**
 screen, opened from the pause menu; earned rows are lit and the rest are dimmed rather
-than hidden, so you can always see what there is left to aim for.
+than hidden, so you can always see what there is left to aim for. Press `L` for it in
+game, or read the tally with `/progress` (and manage it with `/advancement grant|revoke`).
 
 The system is data, not code. Each milestone is one line naming a group, an icon (a
 real item or block id, so the icon renderer draws it), a name, a description and the
@@ -199,6 +243,39 @@ get too close), gravity, voxel collision, leg animation and its own synthesised
 voice. They spawn on grass within a few dozen blocks of you, and despawn when you
 wander off — up to 14 at a time.
 
+**Villages & trading**
+
+Villages dot the land: a levelled terrace with a stone-brick well and four lamp posts at
+its centre, cottages around it under flat slab roofs, a fenced wheat field or two, and
+gravel paths joining them up. Each cottage is cobble-floored with log corner posts, plank
+walls, a glass window on every side, a two-high doorway facing the plaza, and a torch, a
+bed, a crafting table and a chest inside.
+
+A village is placed on a coarse grid, one candidate per 112-block cell, and everything
+about it — where it stands, how high its terrace sits, which way each door faces — is a
+pure function of the cell and the world seed. That is what lets every chunk that touches a
+village stamp the same blocks on its own, in any thread, with the parts that fall outside
+the chunk simply dropped; there is no post-generation pass and no cross-chunk
+coordination. Trees and plants are laid down first and the terrace is stamped over them,
+so nothing grows through a cottage. Only about one cell in six carries a village, and the
+cell grid keeps them far enough apart to be a place you come across rather than the
+default ground.
+
+**Villagers** live in them, not in the wild: the animal spawner never places one, and a
+separate spawner keeps up to eight alive around whichever village is nearest the player.
+A villager is a robed, big-nosed humanoid that (unlike the animals) does not run from you,
+and right-clicking one opens a **trade**.
+
+Each villager keeps one of four trades — Farmer, Butcher, Smith or Mason — chosen from
+where it stands rather than from any saved state, so a village's shopkeepers are the same
+every time without a byte of persistence. Every trade has two sides: the top offer buys
+your goods for an **emerald** (wheat, raw beef, coal or cobblestone), and the bottom one
+spends an emerald on finished goods (bread, cooked porkchop, iron ingots or stone bricks).
+Trading takes what you have and hands over what you bought in one step; it will not take
+payment it cannot pay you back for, and a trade you cannot afford is refused rather than
+let you go into debt. Emeralds are the currency and there is no emerald ore — the only way
+to get one is to trade for it.
+
 **World**
 
 * Infinite chunk-streamed terrain: continents, hills, mountains, oceans and beaches.
@@ -228,6 +305,15 @@ wander off — up to 14 at a time.
 * Minecraft-style voxel lighting: ambient occlusion on every face corner plus a
   baked sky-light gradient that darkens with depth underground.
 * Cross-shaped plants, alpha-cutout leaves and translucent water/glass/ice.
+* The shapes that are not cubes are drawn as their real shapes, not as a cube wearing a
+  texture: a slab is half height, a stair is an L, a trapdoor is a hatch, a fence is a post
+  with rails, a fence gate is a gate panel that remembers which way you faced when you set
+  it, and a door is a thin leaf. The icon in the palette is the same shape, so a trapdoor
+  never shows up as a plain block.
+* **A bed is two cells** — a foot and a head with the pillow at the head — placed together
+  along the way you were facing, and taken apart together when either half is broken.
+* The **ender pearl** is thrown rather than placed: right-click hurls it at whatever the
+  crosshair is on and you arrive where it lands, one pearl poorer.
 * Nine carried items on top of the blocks — stick, coal, iron, gold, diamond,
   apple, bread, copper and a piston arm — each with a generated isometric or
   flat icon, plus a dropped entity form for every one of them.
@@ -294,6 +380,16 @@ before it is handed to a worker thread.
 | 3 Copper Ingot + 1 Glowstone | 1 Lamp |
 | 6 Oak Planks + 3 Copper Ingot | 1 Pressure Plate |
 | 6 Oak Planks + 4 Cobblestone + 2 Iron Ingot | 1 Piston |
+| 2 Iron Ingots (diagonal) | 1 Shears |
+| 1 Iron Ingot + 1 Flint | 1 Flint and Steel |
+| 3 Sticks (diagonal) | 1 Fishing Rod |
+| 5 Gunpowder + 4 Sand (ring) | 1 TNT |
+| 8 Cobblestone + 1 Iron Ingot (ring) | 1 Dispenser |
+| 1 Glass + 1 Feather | 1 Potion of Swiftness |
+| 1 Glass + 1 Slimeball | 1 Potion of Regeneration |
+| 1 Glass + 1 Bone | 1 Potion of Strength |
+| 1 Glass + 1 Glowstone | 1 Potion of Night Vision |
+| 1 Potion + 1 Gunpowder | 1 Splash Potion |
 
 The crafting screen lists every one of these, generated from the recipe table
 itself rather than hand-written, so the list can never describe a recipe the
@@ -320,9 +416,12 @@ only starts scrolling once it runs past ten rows.
   render-distance cap), a **render pack** (Classic / Soft / Vibrant, see below), a
   **max-framerate** cap (or Uncapped), a **distant fog** toggle and a **fog
   distance** multiplier, the per-frame **chunk load budget**, fullscreen, V-Sync,
-  view bobbing, the FPS counter, master and music volume, and the **language**
-  (English / 中文). Everything applies immediately and is written to
-  `user://settings.cfg`.
+  view bobbing, a **lock the mouse** toggle, the FPS counter, master and music
+  volume, and the **language** (English / 中文). Everything applies immediately and is
+  written to `user://settings.cfg`. Locking the mouse captures it — the pointer is clipped
+  to the window, which is what a first-person camera wants — while turning it off leaves
+  the cursor free to reach another monitor, at the cost of the camera stopping when it
+  hits the window edge. Menus and an unfocused window always free the pointer either way.
 * **Create world** also asks whether **cheats** are allowed, which is what the
   command console is gated on; the answer is saved with the world.
 * **HUD** — crosshair, mining progress bar, a 9-slot hotbar with isometric block
@@ -391,16 +490,22 @@ server's admin surface in multiplayer (see [`MULTIPLAYER.md`](MULTIPLAYER.md) §
 | `/fly [on\|off]`, `/heal`, `/kill` | Flight, refill, die | operator |
 | `/fog <scale\|auto>` | Stretch the distant fog | operator |
 | `/rd <chunks>` | Change the render distance | operator |
+| `/progress [milestone]` | List your milestones, or detail one | everyone |
+| `/advancement <grant\|revoke> <id\|all>` | Grant or take back milestones | operator |
 
 Commands are gated by the world's **Allow cheats** flag (a toggle on the create-world
 screen, saved with the world). With cheats off only the informational commands run,
 and the refusal says so rather than failing silently.
 
-**Multiplayer** is planned, not built, but the foundation is in: every block edit
-already funnels through the world-authority seam that the host and client will
-subclass. The rest — ENet host-and-play, predicted block edits with confirm/reject,
-chunk streaming and entity sync — is written up in
-[`MULTIPLAYER.md`](MULTIPLAYER.md), with the order of work and what is already done.
+**Multiplayer** is in, as host-and-play for small worlds: the title menu's
+**MULTIPLAYER** screen hosts on a port or joins an address, and everyone shares one
+authoritative world. Terrain is not sent — `terrain.gd` is seed-deterministic, so a client
+regenerates the same world from the host's seed and only block edits travel the wire (the
+whole diff on join, one small event per edit after that). A client predicts its own edits
+so placing feels instant, then snaps to whatever the host confirms. Every edit already
+funnelled through the world-authority seam, so multiplayer is a subclass of it rather than
+a change to it. Remote avatars, host-authoritative mobs and drops, and a server-side
+command layer are the next steps, written up in [`MULTIPLAYER.md`](MULTIPLAYER.md) §8.
 
 The whole GUI is drawn from procedurally generated pixel textures, and the text uses
 a 5×7 pixel font that is compiled into a real `FontFile` at runtime.
@@ -420,6 +525,7 @@ scripts/
   sfx.gd                 autoload: synthesised sound effects + looping music
   commands.gd            autoload: command registry, permission levels, console
   advancements.gd        autoload: milestone definitions, earning rules, progress state
+  net.gd                 autoload: ENet transport, handshake, host/client authorities
   terrain.gd             worldgen: heightfield, biomes, caves, ore veins, trees
   world.gd               chunk streaming, meshing, light baking, edits, raycasting
   circuit.gd             the power solver: signal propagation and component state
@@ -430,7 +536,7 @@ scripts/
   mobs.gd                mob spawning, despawning and update loop
   slot.gd                one inventory cell widget
   hud.gd                 HUD + inventory/crafting screen
-  ui.gd                  title / create / worlds / settings / pause / death screens
+  ui.gd                  title / create / worlds / multiplayer / settings / pause screens
   main.gd                state machine, world lifecycle, saves, verification harness
 previews/                screenshots produced by the capture pass
 assets/                  brand assets: icon set, banners, promo frames
@@ -442,7 +548,7 @@ export_presets.cfg       the Windows Desktop export preset (UTF-8, no BOM!)
 build_exe.bat            exports a self-contained build\VoxelCraft.exe
 run_game.bat             runs the project from source
 open_editor.bat          opens it in the Godot editor
-MULTIPLAYER.md           design document for netplay (plan only, not implemented)
+MULTIPLAYER.md           design document for netplay (host/join + edit sync implemented)
 build/                   export output; not part of the project, safe to delete
 ```
 
@@ -668,7 +774,8 @@ because an error there is invisible by eye on a 4-pixel limb:
   result earns its own milestone, a counted goal ticks up one event at a time and only
   unlocks at its goal, the kill event matches on species name, the level milestone only
   fires past its threshold, and the whole state round-trips through serialize / reset /
-  load. The last two checks run straight over the definition table — every milestone is
+  load. The console's grant, revoke, grant-all and revoke-all are driven through the real
+  command entry point. The last two checks run straight over the definition table — every milestone is
   in a real group and has a drawable icon — so a milestone that stops matching its event
   is caught rather than silently missing.
 

@@ -82,6 +82,15 @@ const TYPES := {
 		"body_col": "12121a", "head_col": "18181f", "leg_col": "0c0c12",
 		"arm_col": "18181f", "sound": "mob_low",
 	},
+	# ---- wolves. Untamed ones are skittish and harmless; a wolf tamed with a bone
+	# follows its owner and fights hostile mobs on its own.
+	"wolf": {
+		"shape": "quad", "hostile": false, "burn": false, "speed": 1.6, "flee": false,
+		"health": 8.0,
+		"body": [8, 9, 14], "head": [6, 6, 6], "leg": [4, 8, 4],
+		"body_col": "cfcfcf", "head_col": "e0e0e0", "leg_col": "b8b8b8",
+		"snout": "9a9a9a", "snout_size": [3, 2, 2], "sound": "mob_grunt",
+	},
 	# ---- villagers. They are *not* in mobs.gd's PASSIVE roster: the wild spawner would
 	# drop them on any patch of grass. They belong to a village, so mobs.gd spawns them
 	# against a village centre instead. A robe-brown body and a big nose are all it takes
@@ -135,6 +144,22 @@ var _leap_cd := 0.0
 var _burn_t := 0.0
 var _hurt_t := 0.0
 
+# ---- husbandry and taming
+var manager = null           # the mob manager: a tamed wolf looks for prey in its list
+var baby := false
+var grow_t := 0.0
+var love_t := 0.0            # seconds left wanting to breed, set by feeding
+var _breed_cd := 0.0         # a cooldown so two animals do not breed non-stop
+var sheared := false
+var wool_t := 0.0            # fleece regrowth clock
+var tamed := false
+var sitting := false
+var effects: Dictionary = {} # splash-potion effect name -> seconds left
+var _regen_t := 0.0
+## The full-size collision box, kept so a baby can be scaled down and grow back.
+var _h_full := 0.0
+var _half_full := 0.0
+
 var _w := 0.0
 var _d := 0.0
 var _h := 0.0
@@ -148,6 +173,137 @@ func is_hostile() -> bool:
 ## A right-click landed on this mob. Villagers answer it; nothing else cares.
 func interact() -> void:
 	used.emit(self)
+
+
+## Feed it. True when the item is accepted and should be consumed: a breeding animal wants
+## its own food, a wolf a bone to tame it, and a tamed wolf any meat to heal.
+func feed(item_id: int) -> bool:
+	if baby or _breed_cd > 0.0:
+		return false
+	if kind == "wolf":
+		if not tamed:
+			if item_id != Blocks.ITEM_BONE:
+				return false
+			if randf() < 0.34:
+				tamed = true
+				sitting = false
+				Advancements.trigger("tame")
+			Sfx.play(str(def["sound"]), -9.0, 1.1)
+			return true
+		if Blocks.food_value(item_id) > 0:
+			health = minf(health + 6.0, float(def.get("health", 8.0)))
+			Sfx.play("eat", -12.0, 1.1)
+			return true
+		return false
+	if not _breed_food(kind).has(item_id):
+		return false
+	love_t = 30.0
+	Sfx.play(str(def["sound"]), -10.0, 1.1)
+	return true
+
+
+## Shears: a ripe fleece comes off and grows back. Returns the wool count, or -1 when this
+## mob has nothing to shear.
+func shear() -> int:
+	if kind != "sheep" or sheared or baby:
+		return -1
+	_set_sheared_look(true)
+	wool_t = 45.0
+	Sfx.play(str(def["sound"]), -8.0, 1.2)
+	return 1 + randi() % 3
+
+
+## Turns this mob into a newborn: smaller, and growing up over a minute.
+func make_baby() -> void:
+	baby = true
+	grow_t = 60.0
+	_apply_scale(0.55)
+
+
+## A splash potion landed on this mob.
+func apply_effect(name: String, secs: float) -> void:
+	effects[name] = maxf(float(effects.get(name, 0.0)), secs)
+
+
+func has_effect(name: String) -> bool:
+	return effects.has(name)
+
+
+func _apply_scale(f: float) -> void:
+	scale = Vector3(f, f, f)
+	_h = _h_full * f
+	_half = _half_full * f
+
+
+## Colours the body box as shorn skin, or back to the fleece colour.
+func _set_sheared_look(on: bool) -> void:
+	sheared = on
+	if _parts.is_empty():
+		return
+	var c: Color = Color(0.62, 0.52, 0.46) if on else _col("body_col")
+	_parts[0]["base"] = c
+	var mi: MeshInstance3D = _parts[0]["mesh"]
+	(mi.material_override as StandardMaterial3D).albedo_color = c
+
+
+## What the species eats to breed.
+func _breed_food(k: String) -> Array:
+	match k:
+		"cow", "sheep":
+			return [Blocks.ITEM_WHEAT]
+		"pig":
+			return [Blocks.ITEM_CARROT, Blocks.ITEM_POTATO]
+		"chicken":
+			return [Blocks.ITEM_SEEDS]
+	return []
+
+
+## The nearest hostile mob within `radius`, for a tamed wolf to chase, or null.
+func _nearest_hostile(radius: float):
+	if manager == null:
+		return null
+	var best = null
+	var bd := radius * radius
+	for m in manager.mobs:
+		if m == self or not is_instance_valid(m) or not m.is_hostile():
+			continue
+		var d: float = m.global_position.distance_squared_to(global_position)
+		if d < bd:
+			bd = d
+			best = m
+	return best
+
+
+## Melee damage this mob deals, boosted while it is under a strength potion.
+func _atk_dmg() -> float:
+	return float(def.get("atk_dmg", 3.0)) * (1.6 if effects.has("strength") else 1.0)
+
+
+## The husbandry clocks: a baby grows up, a sheared fleece regrows, and any potion effect
+## runs down -- regeneration ticking health back while it lasts.
+func _tick_husbandry(delta: float) -> void:
+	if baby:
+		grow_t -= delta
+		if grow_t <= 0.0:
+			baby = false
+			_apply_scale(1.0)
+	if sheared:
+		wool_t -= delta
+		if wool_t <= 0.0:
+			_set_sheared_look(false)
+	_breed_cd = maxf(0.0, _breed_cd - delta)
+	if effects.is_empty():
+		return
+	for k in effects.keys():
+		var t := float(effects[k]) - delta
+		effects[k] = t
+		if t <= 0.0:
+			effects.erase(k)
+	if effects.has("regen"):
+		_regen_t -= delta
+		if _regen_t <= 0.0:
+			_regen_t = 1.0
+			health = minf(health + 1.0, float(def.get("health", 10.0)))
 
 
 func setup(w, k: String, pos: Vector3) -> void:
@@ -171,6 +327,8 @@ func setup(w, k: String, pos: Vector3) -> void:
 		_d = float(body2[2]) * PX
 		_h = float(leg2[1]) * PX + float(body2[1]) * PX
 	_half = _w * 0.5
+	_h_full = _h
+	_half_full = _half
 	_build()
 	global_position = pos
 	facing = randf() * TAU
@@ -355,12 +513,16 @@ func tick(delta: float, player_pos: Vector3) -> void:
 	_hurt_t = maxf(0.0, _hurt_t - delta)
 	_atk_cd = maxf(0.0, _atk_cd - delta)
 	_leap_cd = maxf(0.0, _leap_cd - delta)
+	_tick_husbandry(delta)
 
 	var speed := 0.0
 	if is_hostile():
 		speed = _tick_hostile(delta, player_pos)
 	else:
 		speed = _tick_passive(delta, player_pos)
+	# a splash potion of swiftness speeds up whatever it lands on
+	if effects.has("swiftness"):
+		speed *= 1.5
 
 	velocity.x = lerpf(velocity.x, _dir.x * speed, clampf(delta * 6.0, 0.0, 1.0))
 	velocity.z = lerpf(velocity.z, _dir.z * speed, clampf(delta * 6.0, 0.0, 1.0))
@@ -407,6 +569,8 @@ func tick(delta: float, player_pos: Vector3) -> void:
 
 
 func _tick_passive(delta: float, player_pos: Vector3) -> float:
+	if tamed:
+		return _tick_tamed(delta, player_pos)
 	_state_t -= delta
 	if _state_t <= 0.0:
 		if _state == 0:
@@ -429,6 +593,31 @@ func _tick_passive(delta: float, player_pos: Vector3) -> float:
 				facing = atan2(away.x, away.z)
 				_dir = away.normalized()
 	return speed
+
+
+## A tamed wolf: sits on command, hunts a hostile mob within reach, and otherwise follows
+## its owner closely. It never wanders or flees.
+func _tick_tamed(_delta: float, player_pos: Vector3) -> float:
+	if sitting:
+		return 0.0
+	var prey = _nearest_hostile(12.0)
+	if prey != null:
+		var to: Vector3 = prey.global_position - global_position
+		to.y = 0.0
+		if to.length() > 0.01:
+			_dir = to.normalized()
+			facing = atan2(_dir.x, _dir.z)
+		if to.length() < 2.0 and _atk_cd <= 0.0:
+			_atk_cd = 0.7
+			prey.hurt_mob(4.0, global_position)
+		return float(def.get("speed", 1.6))
+	var to_p: Vector3 = player_pos - global_position
+	to_p.y = 0.0
+	if to_p.length() > 4.0:
+		_dir = to_p.normalized()
+		facing = atan2(_dir.x, _dir.z)
+		return float(def.get("speed", 1.6)) * 1.3
+	return 0.0
 
 
 func _tick_hostile(delta: float, player_pos: Vector3) -> float:
@@ -475,7 +664,7 @@ func _tick_hostile(delta: float, player_pos: Vector3) -> float:
 			if dist < float(def.get("atk_range", 1.5)) and _atk_cd <= 0.0:
 				_atk_cd = 1.0
 				if player != null and player.has_method("hurt"):
-					player.hurt(float(def.get("atk_dmg", 2.0)))
+					player.hurt(_atk_dmg())
 			elif dist < 5.0 and on_ground and _leap_cd <= 0.0:
 				_leap_cd = 2.2
 				velocity.y = 7.0
@@ -484,7 +673,7 @@ func _tick_hostile(delta: float, player_pos: Vector3) -> float:
 			if dist < float(def.get("atk_range", 1.7)) and _atk_cd <= 0.0:
 				_atk_cd = 1.0
 				if player != null and player.has_method("hurt"):
-					player.hurt(float(def.get("atk_dmg", 3.0)))
+					player.hurt(_atk_dmg())
 	return speed
 
 

@@ -942,6 +942,11 @@ func _on_advancement(id: String) -> void:
 	nm.add_theme_font_size_override("font_size", PFont.M)
 	col.add_child(nm)
 
+	# the banner is transient; also drop a line in the chat log so the milestone is still
+	# on record a few seconds later, the way Minecraft logs an advancement
+	chat_print(I18n.tf("Advancement made: %s", [I18n.t(str(d["name"]))]),
+		Color(0.95, 0.86, 0.48))
+
 	panel.modulate = Color(1, 1, 1, 0)
 	var tw := create_tween()
 	tw.tween_property(panel, "modulate", Color(1, 1, 1, 1), 0.25)

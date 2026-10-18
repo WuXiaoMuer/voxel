@@ -7,6 +7,10 @@ const MAX_HOSTILE := 10
 ## Villagers are counted apart from the animals: a village keeps its own little crowd,
 ## and those must not eat into the wildlife budget.
 const MAX_VILLAGERS := 8
+## Wolves are their own small population: they live in the woods, not on the farm.
+const MAX_WOLVES := 5
+## The species that can be bred by feeding them, and the two adults a pair needs.
+const BREEDABLE := ["pig", "cow", "sheep", "chicken"]
 const SPAWN_MIN := 18.0
 const SPAWN_MAX := 44.0
 const DESPAWN := 96.0
@@ -57,8 +61,10 @@ func count_hostile() -> int:
 	return n
 
 
-## Spawn a specific mob at a spot (used by the preview pass and the tests).
-func spawn_at(kind: String, pos: Vector3):
+## Build one mob, wire it up and add it to the world. Everything that spawns a mob goes
+## through here, so the signals, the manager back-reference and the villager trade are
+## never missed on one path and forgotten on another.
+func _spawn(kind: String, pos: Vector3):
 	var m = _script.new()
 	add_child(m)
 	m.setup(world, kind, pos)
@@ -66,12 +72,18 @@ func spawn_at(kind: String, pos: Vector3):
 		m.profession = _profession_at(pos)
 	m.player = player
 	m.particles = particles
+	m.manager = self
 	m.died.connect(_on_mob_died)
 	m.fired.connect(_on_mob_fired)
 	m.exploded.connect(_on_mob_exploded)
 	m.used.connect(_on_mob_used)
 	mobs.append(m)
 	return m
+
+
+## Spawn a specific mob at a spot (used by the preview pass and the tests).
+func spawn_at(kind: String, pos: Vector3):
+	return _spawn(kind, pos)
 
 
 ## Which trade a villager standing at `pos` keeps. Read off the column it stands in, so
@@ -88,13 +100,14 @@ func update(player_pos: Vector3, delta: float, night: bool = false) -> void:
 	for m in mobs:
 		if not is_instance_valid(m):
 			continue
-		if m.global_position.distance_to(player_pos) > DESPAWN:
+		if not m.tamed and m.global_position.distance_to(player_pos) > DESPAWN:
 			m.queue_free()
 			continue
 		_tick_environment(m, delta, night)
 		m.tick(delta, player_pos)
 		alive.append(m)
 	mobs = alive
+	_tick_breeding(delta)
 
 	_timer -= delta
 	if _timer <= 0.0:
@@ -109,6 +122,9 @@ func update(player_pos: Vector3, delta: float, night: bool = false) -> void:
 		# few seconds instead of appearing all at once.
 		if _count_of("villager") < MAX_VILLAGERS and randf() < 0.5:
 			_try_spawn_villager(player_pos)
+		# wolves live in the woods, so they are rolled separately from the farm animals
+		if _count_of("wolf") < MAX_WOLVES and randf() < 0.35:
+			_try_spawn_wolf(player_pos)
 
 
 ## The mobs of one species currently alive.
@@ -187,16 +203,68 @@ func _try_spawn(player_pos: Vector3, hostile: bool) -> void:
 				continue
 		elif world.get_block(gx, gy - 1, gz) != Blocks.GRASS:
 			continue
-		var m = _script.new()
-		add_child(m)
-		m.setup(world, list[randi() % list.size()], spot)
-		m.player = player
-		m.particles = particles
-		m.died.connect(_on_mob_died)
-		m.fired.connect(_on_mob_fired)
-		m.exploded.connect(_on_mob_exploded)
-		mobs.append(m)
+		_spawn(list[randi() % list.size()], spot)
 		return
+
+
+## Wolves spawn in woodland only, on grass like the farm animals.
+func _try_spawn_wolf(player_pos: Vector3) -> void:
+	if world.terrain == null:
+		return
+	for attempt in 8:
+		var ang := randf() * TAU
+		var dist := randf_range(SPAWN_MIN, SPAWN_MAX)
+		var x := floori(player_pos.x + cos(ang) * dist)
+		var z := floori(player_pos.z + sin(ang) * dist)
+		if not world.chunks.has(Vector2i(x >> 4, z >> 4)):
+			continue
+		var bio: int = world.terrain.biome_at(x, z)
+		if bio != VoxelTerrain.B_FOREST and bio != VoxelTerrain.B_BIRCH_FOREST:
+			continue
+		var spot: Vector3 = world.safe_spawn_near(Vector3(float(x) + 0.5, 0, float(z) + 0.5))
+		var gx := floori(spot.x)
+		var gy := floori(spot.y)
+		var gz := floori(spot.z)
+		if world.get_block(gx, gy, gz) != Blocks.AIR:
+			continue
+		if world.get_block(gx, gy - 1, gz) != Blocks.GRASS:
+			continue
+		_spawn("wolf", spot)
+		return
+
+
+## Two adults of the same species that both want to breed, standing close together, make
+## one baby and go quiet for a while. Pairing happens here because no single mob can see
+## the others.
+func _tick_breeding(delta: float) -> void:
+	var ready: Array = []
+	for m in mobs:
+		if not is_instance_valid(m):
+			continue
+		m.love_t = maxf(0.0, m.love_t - delta)
+		if m.love_t > 0.0 and not m.baby and BREEDABLE.has(str(m.kind)):
+			ready.append(m)
+	var used: Dictionary = {}
+	for i in ready.size():
+		var a = ready[i]
+		if used.has(a):
+			continue
+		for j in range(i + 1, ready.size()):
+			var b = ready[j]
+			if used.has(b) or str(b.kind) != str(a.kind):
+				continue
+			if a.global_position.distance_to(b.global_position) > 6.0:
+				continue
+			used[a] = true
+			used[b] = true
+			a.love_t = 0.0
+			b.love_t = 0.0
+			a._breed_cd = 30.0
+			b._breed_cd = 30.0
+			var baby = _spawn(str(a.kind), a.global_position + Vector3(0, 0.1, 0))
+			baby.make_baby()
+			Advancements.trigger("breed", str(a.kind))
+			return
 
 
 ## The mob whose body a ray from `origin` along `dir` first hits, or null. Used by the

@@ -97,6 +97,13 @@ signal block_hit(pos: Vector3i, id: int)
 signal block_broken(pos: Vector3i, id: int)
 ## Emitted when the player throws something out of the hotbar with Q.
 signal item_thrown(id: int, count: int)
+## Something an interaction dropped into the player's hands: wool from shearing a sheep, a
+## fish from the water. main spawns the item entity, because player owns no drop manager.
+signal mob_dropped(id: int, count: int, pos: Vector3)
+## A TNT block was lit with flint and steel. main owns the fuse and the blast.
+signal tnt_lit(pos: Vector3i)
+## An arrow was fed to a dispenser. main launches it, since projectiles live there.
+signal dispenser_fired(pos: Vector3i, dir: Vector3)
 
 var world
 var camera: Camera3D
@@ -168,6 +175,15 @@ var _sprint_toggle := false
 var _reach := REACH
 var mobs = null              # injected by main: the melee swing's mob raycast
 var _starve_timer := 0.0
+
+# ---- potions: effect name -> seconds left. Swiftness, Regeneration, Strength and Night
+# Vision are the four, applied by drinking a potion or standing in a splash.
+var effects: Dictionary = {}
+var _regen_t := 0.0
+# ---- fishing: the bobber in the water, if a line is out
+var _bobber: MeshInstance3D = null
+var _bob_t := 0.0
+var _bitten := false
 
 var _searching := {}
 
@@ -302,6 +318,8 @@ func place_at(pos: Vector3) -> void:
 	while world != null and _collides_at(global_position) and guard < 64:
 		global_position.y += 1.0
 		guard += 1
+	# a teleport or a respawn drops any fishing line that was out
+	_clear_bobber()
 	velocity = Vector3.ZERO
 	_fall_y = global_position.y
 	_airborne = false
@@ -540,6 +558,10 @@ func _physics_process(delta: float) -> void:
 		return
 	rotation.y = yaw
 	cam_pivot.rotation.x = pitch
+	# potion effects and the fishing line run whether or not input is enabled, so a potion
+	# does not freeze while a menu is open
+	_tick_effects(delta)
+	_tick_fishing(delta)
 
 	if dead:
 		velocity.y -= GRAVITY * delta
@@ -594,6 +616,9 @@ func _physics_process(delta: float) -> void:
 		speed = FLY * 0.4
 
 	var target := move * speed
+	# a potion of swiftness makes every gait quicker
+	if has_effect("swiftness"):
+		target *= 1.3
 	# Ground control is snappy, the way Minecraft's is. Air control is deliberately weak:
 	# in Minecraft a jump commits you to the direction you took off in, and being able to
 	# steer freely through the air makes every gap trivially easy and reads as "floaty".
@@ -936,7 +961,8 @@ func _update_interaction(delta: float) -> void:
 						swing_t = 1.0
 						Sfx.play_varied("dig", -10.0, 0.12)
 						m.hurt_mob(Gear.damage_of(selected_id())
-							+ Gear.ench_damage_bonus(hotbar[selected]), global_position)
+							+ Gear.ench_damage_bonus(hotbar[selected]) + _melee_bonus(),
+							global_position)
 						if Gear.is_tool(selected_id()):
 							tool_damage_selected(1)
 					_dig_progress = 0.0
@@ -1063,12 +1089,18 @@ func _farm_action(hit: Dictionary, hp: Vector3i, hid: int) -> bool:
 		swing_t = 0.9
 		tool_damage_selected(1)
 		return true
-	if id == Blocks.ITEM_SEEDS and hid == Blocks.FARMLAND:
+	if (id == Blocks.ITEM_SEEDS or id == Blocks.ITEM_CARROT or id == Blocks.ITEM_POTATO) \
+			and hid == Blocks.FARMLAND:
 		var cell: Vector3i = hit["prev"]
 		# only on the top face, so a side-on click does not plant a floating crop
 		if cell == Vector3i(hp.x, hp.y + 1, hp.z) \
 				and world.get_block(cell.x, cell.y, cell.z) == Blocks.AIR:
-			world.set_block(cell.x, cell.y, cell.z, Blocks.WHEAT_0)
+			var plant := Blocks.WHEAT_0
+			if id == Blocks.ITEM_CARROT:
+				plant = Blocks.CARROT_0
+			elif id == Blocks.ITEM_POTATO:
+				plant = Blocks.POTATO_0
+			world.set_block(cell.x, cell.y, cell.z, plant)
 			Sfx.play_varied("place", -12.0, 0.1)
 			swing_t = 0.9
 			consume_selected(1)
@@ -1076,11 +1108,22 @@ func _farm_action(hit: Dictionary, hp: Vector3i, hid: int) -> bool:
 	return false
 
 
-## Items that do something other than place a block. Right now that is the ender pearl:
-## thrown at whatever the crosshair is on, and you arrive where it lands. It lands short of
-## the block face so you are never teleported into the block you were aiming at.
+## Items that do something other than place a block: flint and steel lights a fuse, the rod
+## casts and reels, a potion is drunk or thrown, and the ender pearl teleports you to where
+## it lands (short of the block face, so you never arrive inside the block you aimed at).
 func _item_use(hit: Dictionary) -> bool:
-	if selected_id() != Blocks.ITEM_ENDER_PEARL:
+	var held := selected_id()
+	if held == Blocks.ITEM_FLINT_STEEL:
+		return _light_tnt(hit)
+	if held == Blocks.ITEM_FISHING_ROD:
+		return _fishing_use(hit)
+	if _is_potion(held):
+		return _drink_potion(held)
+	if _is_splash(held):
+		return _throw_potion(held, hit)
+	if held == Blocks.ITEM_ARROW:
+		return _dispenser_fire(hit)
+	if held != Blocks.ITEM_ENDER_PEARL:
 		return false
 	var eye := eye_position()
 	var dir := look_dir()
@@ -1099,6 +1142,241 @@ func _item_use(hit: Dictionary) -> bool:
 	return true
 
 
+# ================================================================ husbandry, fishing,
+# explosives and potions
+## Right-clicking a mob: shear a sheep, feed an animal to breed it, tame a wolf with a
+## bone, or tell a tamed wolf to sit. Whatever it accepts is spent out of the hand.
+func _mob_action(m) -> bool:
+	var held := selected_id()
+	if str(m.kind) == "wolf" and m.tamed and held == 0:
+		m.sitting = not m.sitting
+		m.velocity = Vector3.ZERO
+		Sfx.play("click", -12.0, 1.1)
+		return true
+	if held == Blocks.ITEM_SHEARS and str(m.kind) == "sheep":
+		var n: int = m.shear()
+		if n > 0:
+			mob_dropped.emit(Blocks.WOOL_0, n, m.global_position + Vector3(0, 0.3, 0))
+			tool_damage_selected(1)
+			swing_t = 0.9
+			return true
+		return false
+	if held <= 0:
+		return false
+	if m.feed(held):
+		if not creative:
+			consume_selected(1)
+		swing_t = 0.9
+		return true
+	return false
+
+
+## Handing an arrow to a dispenser launches it forward, along your aim.
+func _dispenser_fire(hit: Dictionary) -> bool:
+	if hit.is_empty():
+		return false
+	var hp: Vector3i = hit["pos"]
+	if world.get_block(hp.x, hp.y, hp.z) != Blocks.DISPENSER:
+		return false
+	dispenser_fired.emit(hp, look_dir())
+	consume_selected(1)
+	swing_t = 0.9
+	Sfx.play("bow", -6.0, 1.0)
+	return true
+
+
+## Flint and steel lights a TNT block's fuse. main runs the fuse and the blast; this only
+## arms it.
+func _light_tnt(hit: Dictionary) -> bool:
+	if hit.is_empty():
+		return false
+	var hp: Vector3i = hit["pos"]
+	if world.get_block(hp.x, hp.y, hp.z) != Blocks.TNT:
+		return false
+	tnt_lit.emit(hp)
+	swing_t = 0.9
+	tool_damage_selected(1)
+	Sfx.play("click", -6.0, 1.3)
+	return true
+
+
+func _is_potion(id: int) -> bool:
+	return id >= Blocks.ITEM_POTION_SWIFTNESS and id <= Blocks.ITEM_POTION_NIGHT
+
+
+func _is_splash(id: int) -> bool:
+	return id >= Blocks.ITEM_POTION_SPLASH_SWIFTNESS \
+		and id <= Blocks.ITEM_POTION_SPLASH_NIGHT
+
+
+## The effect name a potion applies.
+func _potion_effect(id: int) -> String:
+	match id:
+		Blocks.ITEM_POTION_SWIFTNESS, Blocks.ITEM_POTION_SPLASH_SWIFTNESS:
+			return "swiftness"
+		Blocks.ITEM_POTION_REGEN, Blocks.ITEM_POTION_SPLASH_REGEN:
+			return "regen"
+		Blocks.ITEM_POTION_STRENGTH, Blocks.ITEM_POTION_SPLASH_STRENGTH:
+			return "strength"
+		Blocks.ITEM_POTION_NIGHT, Blocks.ITEM_POTION_SPLASH_NIGHT:
+			return "night"
+	return ""
+
+
+## How long an effect lasts, in seconds. Regeneration and night vision differ from the
+## two-minute default on purpose.
+func _potion_time(e: String) -> float:
+	match e:
+		"regen":
+			return 30.0
+		"night":
+			return 180.0
+	return 120.0
+
+
+## Drink a potion: apply its effect to yourself and spend the bottle.
+func _drink_potion(id: int) -> bool:
+	var e := _potion_effect(id)
+	if e == "":
+		return false
+	add_effect(e, _potion_time(e))
+	consume_selected(1)
+	Advancements.trigger("potion", id)
+	swing_t = 0.6
+	Sfx.play("splash", -6.0, 1.2)
+	return true
+
+
+## Throw a splash potion: it breaks where the crosshair lands, and everything within a few
+## blocks -- you and any mobs -- takes the effect.
+func _throw_potion(id: int, hit: Dictionary) -> bool:
+	var e := _potion_effect(id)
+	if e == "":
+		return false
+	var target: Vector3
+	if hit.is_empty():
+		target = eye_position() + look_dir() * 8.0
+	else:
+		var hp: Vector3i = hit["pos"]
+		target = Vector3(hp) + Vector3(0.5, 0.5, 0.5)
+	var radius := 4.0
+	if global_position.distance_to(target) <= radius:
+		add_effect(e, _potion_time(e))
+	if mobs != null:
+		for m in mobs.mobs:
+			if is_instance_valid(m) and m.global_position.distance_to(target) <= radius:
+				m.apply_effect(e, _potion_time(e))
+	consume_selected(1)
+	swing_t = 0.9
+	Sfx.play("splash", -4.0, 1.0)
+	return true
+
+
+func has_effect(name: String) -> bool:
+	return effects.has(name)
+
+
+func add_effect(name: String, secs: float) -> void:
+	effects[name] = maxf(float(effects.get(name, 0.0)), secs)
+
+
+## Bonus melee damage while a strength potion is up.
+func _melee_bonus() -> float:
+	return 3.0 if has_effect("strength") else 0.0
+
+
+## Runs the potion effects down, healing while regeneration lasts.
+func _tick_effects(delta: float) -> void:
+	if effects.is_empty():
+		return
+	for k in effects.keys():
+		var t := float(effects[k]) - delta
+		effects[k] = t
+		if t <= 0.0:
+			effects.erase(k)
+	if effects.has("regen"):
+		_regen_t -= delta
+		if _regen_t <= 0.0:
+			_regen_t = 1.5
+			health = minf(health + 2.0, MAX_HEALTH)
+			health_changed.emit()
+
+
+## The rod: cast into water when no line is out, reel it in when one is.
+func _fishing_use(hit: Dictionary) -> bool:
+	if _bobber != null:
+		return _reel()
+	if hit.is_empty():
+		return false
+	var hp: Vector3i = hit["pos"]
+	# the ray usually stops at the seabed under the water rather than inside it, so a cast
+	# counts when the target block is water or has water above it
+	if world.get_block(hp.x, hp.y, hp.z) != Blocks.WATER \
+			and world.get_block(hp.x, hp.y + 1, hp.z) != Blocks.WATER:
+		return false
+	var surface: Vector3i = hp if world.get_block(hp.x, hp.y, hp.z) == Blocks.WATER \
+		else Vector3i(hp.x, hp.y + 1, hp.z)
+	_bobber = MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.16, 0.16, 0.16)
+	_bobber.mesh = bm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.86, 0.22, 0.16)
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_bobber.material_override = mat
+	_bobber.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_bobber.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	# parented to the world, not to the player: a bobber that followed you around would
+	# never stay in the water you cast it into
+	get_parent().add_child(_bobber)
+	_bobber.global_position = Vector3(float(surface.x) + 0.5, float(surface.y) + 0.92,
+		float(surface.z) + 0.5)
+	_bob_t = randf_range(3.0, 10.0)
+	_bitten = false
+	swing_t = 0.7
+	Sfx.play("splash", -10.0, 1.4)
+	return true
+
+
+## Reel the line in. A bite is a fish; reeling early just brings the line back.
+func _reel() -> bool:
+	var was := _bitten
+	var at: Vector3 = _bobber.global_position if _bobber != null else global_position
+	_clear_bobber()
+	if was:
+		mob_dropped.emit(Blocks.ITEM_FISH_RAW, 1, at + Vector3(0, 0.4, 0))
+		tool_damage_selected(1)
+		Sfx.play("pop", -6.0, 1.1)
+	else:
+		Sfx.play("click", -12.0, 1.2)
+	swing_t = 0.7
+	return true
+
+
+func _clear_bobber() -> void:
+	if _bobber != null and is_instance_valid(_bobber):
+		_bobber.queue_free()
+	_bobber = null
+	_bitten = false
+
+
+## The bobber floats where it was cast; after a while a fish takes the bait.
+func _tick_fishing(delta: float) -> void:
+	if _bobber == null or not is_instance_valid(_bobber):
+		return
+	if _bitten:
+		return
+	# the line snaps if you walk away
+	if global_position.distance_to(_bobber.global_position) > 24.0:
+		_clear_bobber()
+		return
+	_bob_t -= delta
+	if _bob_t <= 0.0:
+		_bitten = true
+		_bobber.global_position.y -= 0.12
+		Sfx.play("splash", -8.0, 1.5)
+
+
 func _try_place() -> void:
 	var hit: Dictionary = world.raycast(eye_position(), look_dir(), _reach)
 	# A villager under the crosshair is spoken to, not built over: right-click opens the
@@ -1106,6 +1384,10 @@ func _try_place() -> void:
 	# block still trades rather than the block behind them being operated.
 	if mobs != null:
 		var vm = mobs.raycast_mob(eye_position(), look_dir(), _reach)
+		# feeding, shearing and taming are done by hand, so they are answered before the
+		# block under the crosshair is touched at all
+		if vm != null and _mob_action(vm):
+			return
 		if vm != null and str(vm.kind) == "villager":
 			var vd: float = eye_position().distance_to(
 				vm.global_position + Vector3(0, float(vm._h) * 0.5, 0))
@@ -1654,6 +1936,37 @@ const RECIPES := [
 	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_13], "out": [Blocks.WOOL_13, 1]},
 	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_14], "out": [Blocks.WOOL_14, 1]},
 	{"type": "shapeless", "in": [Blocks.WOOL_0, Blocks.ITEM_DYE_15], "out": [Blocks.WOOL_15, 1]},
+
+	# --- husbandry, fishing, explosives and potions
+	{"type": "shaped", "pattern": ["M ", " M"], "key": {"M": Blocks.ITEM_IRON},
+		"out": [Blocks.ITEM_SHEARS, 1]},
+	{"type": "shapeless", "in": [Blocks.ITEM_IRON, Blocks.ITEM_FLINT],
+		"out": [Blocks.ITEM_FLINT_STEEL, 1]},
+	{"type": "shaped", "pattern": ["  S", " S ", "S  "], "key": {"S": Blocks.ITEM_STICK},
+		"out": [Blocks.ITEM_FISHING_ROD, 1]},
+	{"type": "shaped", "pattern": ["GSG", "SGS", "GSG"], "key": {"G": Blocks.ITEM_GUNPOWDER,
+		"S": Blocks.SAND}, "out": [Blocks.TNT, 1]},
+	# the dispenser ring has an iron core, so it does not collide with the furnace's
+	# cobblestone ring -- two recipes off one pattern would leave the second unreachable
+	{"type": "shaped", "pattern": ["CCC", "CIC", "CCC"], "key": {"C": Blocks.COBBLESTONE,
+		"I": Blocks.ITEM_IRON}, "out": [Blocks.DISPENSER, 1]},
+	# potions are brewed from a pane of glass and one reagent; gunpowder makes a splash
+	{"type": "shapeless", "in": [Blocks.GLASS, Blocks.ITEM_FEATHER],
+		"out": [Blocks.ITEM_POTION_SWIFTNESS, 1]},
+	{"type": "shapeless", "in": [Blocks.GLASS, Blocks.ITEM_SLIME_BALL],
+		"out": [Blocks.ITEM_POTION_REGEN, 1]},
+	{"type": "shapeless", "in": [Blocks.GLASS, Blocks.ITEM_BONE],
+		"out": [Blocks.ITEM_POTION_STRENGTH, 1]},
+	{"type": "shapeless", "in": [Blocks.GLASS, Blocks.GLOWSTONE],
+		"out": [Blocks.ITEM_POTION_NIGHT, 1]},
+	{"type": "shapeless", "in": [Blocks.ITEM_POTION_SWIFTNESS, Blocks.ITEM_GUNPOWDER],
+		"out": [Blocks.ITEM_POTION_SPLASH_SWIFTNESS, 1]},
+	{"type": "shapeless", "in": [Blocks.ITEM_POTION_REGEN, Blocks.ITEM_GUNPOWDER],
+		"out": [Blocks.ITEM_POTION_SPLASH_REGEN, 1]},
+	{"type": "shapeless", "in": [Blocks.ITEM_POTION_STRENGTH, Blocks.ITEM_GUNPOWDER],
+		"out": [Blocks.ITEM_POTION_SPLASH_STRENGTH, 1]},
+	{"type": "shapeless", "in": [Blocks.ITEM_POTION_NIGHT, Blocks.ITEM_GUNPOWDER],
+		"out": [Blocks.ITEM_POTION_SPLASH_NIGHT, 1]},
 ]
 
 
