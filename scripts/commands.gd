@@ -182,8 +182,8 @@ func _register_all() -> void:
 		LEVEL_OP, _cmd_clear)
 	register("time", "/time set <day|noon|night|midnight|0..1>",
 		"Set the time of day.", LEVEL_OP, _cmd_time)
-	register("weather", "/weather <clear|rain>", "Accepted for completeness.",
-		LEVEL_OP, _cmd_weather)
+	register("weather", "/weather <clear|rain|thunder>",
+		"Set the weather at once: clear, rain or a thunderstorm.", LEVEL_OP, _cmd_weather)
 	register("tp", "/tp <x> <y> <z>", "Teleport to a position.",
 		LEVEL_OP, _cmd_tp, ["teleport"])
 	register("spawn", "/spawn", "Teleport back to the world spawn.",
@@ -312,8 +312,25 @@ func _cmd_time(args: Array) -> void:
 	output.emit(I18n.tf("Time set to %.2f.", [t]))
 
 
-func _cmd_weather(_args: Array) -> void:
-	output.emit(I18n.t("There is no weather yet; the sky is always clear."))
+func _cmd_weather(args: Array) -> void:
+	# The sky has run its own weather clock since it was added — it just never had a
+	# command pointing at it. `set_weather` takes the hard switch, so the change is
+	# instant rather than waiting out the fade.
+	var w := -1
+	if args.size() > 0:
+		match str(args[0]).to_lower():
+			"clear", "sun", "sunny":
+				w = sky.Weather.CLEAR
+			"rain", "raining", "stormy":
+				w = sky.Weather.RAIN
+			"thunder", "storm", "thunderstorm":
+				w = sky.Weather.THUNDER
+	if w < 0:
+		output.emit("/weather <clear|rain|thunder>")
+		return
+	sky.set_weather(w, true)
+	var names := ["clear", "rain", "thunder"]
+	output.emit(I18n.tf("Weather set to %s.", [names[w]]))
 
 
 func _cmd_tp(args: Array) -> void:

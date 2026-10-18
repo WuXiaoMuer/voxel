@@ -6,8 +6,11 @@ const TILE := 16          # texture size
 const PAD := 2            # gutter used to keep mipmaps from bleeding
 const CELL := TILE + PAD * 2
 const COLS := 8
-const ROWS := 16
-const TILES := 113
+# 20 rows rather than 16: the nether blocks pushed the tile count past the 8x16 = 128 the
+# atlas used to hold, and a tile that falls off the end of the atlas is drawn from a
+# nonexistent cell.
+const ROWS := 20
+const TILES := 133
 
 # ---------------------------------------------------------------- block ids
 const AIR := 0
@@ -162,6 +165,33 @@ const POTATO_3 := 114
 # TNT and a dispenser: the two powered-ish blocks the explosives bundle adds.
 const TNT := 115
 const DISPENSER := 116
+## A working block, not a station with a screen: a worn tool is repaired on it.
+const ANVIL := 117
+## The station that brews potions without the crafting grid, for a glass and a reagent.
+const BREWING_STAND := 118
+## A funnel: it takes an item a step down the line, from the container above to the one
+## below, without anything to power it.
+const HOPPER := 119
+## A sensor: it pulses once whenever the block it faces changes.
+const OBSERVER := 120
+## A reader: it drives its output at a level set by how full the container behind it is.
+const COMPARATOR := 121
+## A lighthouse: standing on a base of mineral blocks, it feeds regeneration to everyone in
+## range. It is a light source in its own right, so it also lights the room it is in.
+const BEACON := 122
+## A track: a cart rolls along one faster than it does over plain ground.
+const RAIL := 123
+# ---------------------------------------------------------------- the nether
+# The dimension's own kit. Netherrack is the filler rock, soul sand the slow patch that
+# grows nothing, nether bricks the worked stone, magma the burning floor and the quartz
+# ore the reward for digging through it. The portal block itself is not placed by hand: it
+# is what an obsidian frame turns into when lit.
+const NETHERRACK := 124
+const SOUL_SAND := 125
+const NETHER_BRICK_BLOCK := 126
+const MAGMA := 127
+const NETHER_QUARTZ_ORE := 128
+const NETHER_PORTAL := 129
 
 # ---------------------------------------------------------------- item ids
 const ITEM_STICK := 256
@@ -276,6 +306,16 @@ const ITEM_POTION_SPLASH_SWIFTNESS := 347
 const ITEM_POTION_SPLASH_REGEN := 348
 const ITEM_POTION_SPLASH_STRENGTH := 349
 const ITEM_POTION_SPLASH_NIGHT := 350
+# the bow is the one carried item that is drawn rather than clicked
+const ITEM_BOW := 351
+# the two vehicles: placed as entities rather than as blocks
+const ITEM_MINECART := 352
+const ITEM_BOAT := 353
+# ---------------------------------------------------------------- nether drops
+# Nether quartz is the ore's drop; a nether brick is what smelting netherrack yields, and
+# four of them press into one nether-brick block.
+const ITEM_NETHER_QUARTZ := 354
+const ITEM_NETHER_BRICK := 355
 
 # ---------------------------------------------------------------- tile ids
 const T_GRASS_TOP := 0
@@ -388,6 +428,35 @@ const T_TNT_SIDE := 109
 const T_TNT_TOP := 110
 const T_DISPENSER_SIDE := 111
 const T_DISPENSER_FRONT := 112
+# the anvil: a worn iron working face on top, a horn and a waist on the sides
+const T_ANVIL_TOP := 113
+const T_ANVIL_SIDE := 114
+# the brewing stand: a stone base with the flame that does the work on its top face
+const T_BREW_SIDE := 115
+const T_BREW_TOP := 116
+# the hopper: a funnel seen from above, and its body seen from the side
+const T_HOPPER_TOP := 117
+const T_HOPPER_SIDE := 118
+# the observer: a plain body, and a face whose eye lights while it pulses
+const T_OBSERVER_SIDE := 119
+const T_OBSERVER_OFF := 120
+const T_OBSERVER_ON := 121
+# the comparator: a grooved body, and a front whose two dots light when it outputs
+const T_COMPARATOR_SIDE := 122
+const T_COMPARATOR_OFF := 123
+const T_COMPARATOR_ON := 124
+# the beacon: the same face all round, since a beacon is meant to be seen from anywhere
+const T_BEACON := 125
+# the rail: a flat plate like a wire, with two rails and their sleepers drawn on it
+const T_RAIL := 126
+# ---------------------------------------------------------------- the nether (the atlas
+# grew a fourth bank of rows for these)
+const T_NETHERRACK := 127
+const T_SOUL_SAND := 128
+const T_NETHER_BRICK := 129
+const T_MAGMA := 130
+const T_QUARTZ_ORE := 131
+const T_PORTAL := 132
 
 # The sixteen dye colours, in Minecraft's order. `WOOL_NAMES[i]` names `WOOL_0 + i`,
 # `ITEM_DYE_0 + i`, `CARPET_0 + i` and `T_WOOL_0 + i` alike; `WOOL_COLORS[i]` is the
@@ -605,6 +674,34 @@ func _build_defs() -> void:
 	# that launches an arrow)
 	_def(TNT, "TNT", [T_TNT_TOP, T_TNT_SIDE, T_TNT_SIDE], K_CUBE, 0.5, TNT)
 	_def(DISPENSER, "Dispenser", [T_DISPENSER_SIDE, T_DISPENSER_SIDE, T_DISPENSER_FRONT], K_CUBE, 3.5, DISPENSER)
+	_def(ANVIL, "Anvil", [T_ANVIL_TOP, T_ANVIL_SIDE, T_ANVIL_SIDE], K_CUBE, 5.0, ANVIL)
+	_def(BREWING_STAND, "Brewing Stand", [T_BREW_TOP, T_BREW_SIDE, T_BREW_SIDE],
+		K_CUBE, 1.0, BREWING_STAND)
+	_def(HOPPER, "Hopper", [T_HOPPER_TOP, T_HOPPER_SIDE, T_HOPPER_SIDE],
+		K_CUBE, 3.0, HOPPER)
+	# Both are one id with two faces, like the switch and the lamp: the lit face lives in
+	# a tile override rather than in a second block id, so a pulsing observer is still an
+	# observer and a comparison never changes what a comparator is.
+	_def(OBSERVER, "Observer", [T_OBSERVER_ON, T_OBSERVER_SIDE, T_OBSERVER_OFF],
+		K_CUBE, 3.0, OBSERVER)
+	_def(COMPARATOR, "Comparator", [T_COMPARATOR_ON, T_COMPARATOR_SIDE, T_COMPARATOR_OFF],
+		K_CUBE, 0.5, COMPARATOR)
+	# emission 15, like a lamp: a beacon is a light source as well as a station
+	_def(BEACON, "Beacon", T_BEACON, K_CUBE, 3.0, BEACON, 15)
+	# a rail is a flat plate, like a wire: it lies on the floor rather than filling the cell
+	_def(RAIL, "Rail", T_RAIL, K_FLAT, 0.6, RAIL)
+
+	# ---- the nether. Netherrack is soft and quick to dig; soul sand is a little slower
+	# to walk over (the player's step is slowed on it) and drops itself; the brick block is
+	# the built one; magma burns whatever stands on it; the quartz ore is the dimension's
+	# reward; and the portal is the lit frame -- translucent and non-solid, so you walk
+	# into it rather than onto it.
+	_def(NETHERRACK, "Netherrack", T_NETHERRACK, K_CUBE, 0.4, NETHERRACK)
+	_def(SOUL_SAND, "Soul Sand", T_SOUL_SAND, K_CUBE, 0.5, SOUL_SAND)
+	_def(NETHER_BRICK_BLOCK, "Nether Bricks", T_NETHER_BRICK, K_CUBE, 2.0, NETHER_BRICK_BLOCK)
+	_def(MAGMA, "Magma Block", T_MAGMA, K_CUBE, 0.5, MAGMA)
+	_def(NETHER_QUARTZ_ORE, "Nether Quartz Ore", T_QUARTZ_ORE, K_CUBE, 3.0, ITEM_NETHER_QUARTZ)
+	_def(NETHER_PORTAL, "Nether Portal", T_PORTAL, K_TRANSLUCENT, -1.0, -1, 11)
 
 	# non-block items share the same id space so an inventory slot is just an int
 	names[ITEM_STICK] = "Stick"
@@ -694,6 +791,11 @@ func _build_defs() -> void:
 	names[ITEM_POTION_SPLASH_REGEN] = "Splash Potion of Regeneration"
 	names[ITEM_POTION_SPLASH_STRENGTH] = "Splash Potion of Strength"
 	names[ITEM_POTION_SPLASH_NIGHT] = "Splash Potion of Night Vision"
+	names[ITEM_BOW] = "Bow"
+	names[ITEM_MINECART] = "Minecart"
+	names[ITEM_BOAT] = "Boat"
+	names[ITEM_NETHER_QUARTZ] = "Nether Quartz"
+	names[ITEM_NETHER_BRICK] = "Nether Brick"
 
 	for id in range(0, 512):
 		var d = defs[id]
@@ -757,6 +859,10 @@ func _build_defs() -> void:
 	solid[FENCE_GATE] = 1
 	# a ladder is climbable, which means you can walk *into* its cell
 	solid[LADDER] = 0
+	# the portal is walked into, not stood on: the whole point is to pass through it, so it
+	# must never block movement, and it must not occlude or the frame behind it would vanish
+	solid[NETHER_PORTAL] = 0
+	occluder[NETHER_PORTAL] = 0
 	# glass panes and doors are solid to walk into, but see-through
 	solid[GLASS_PANE] = 1
 	solid[DOOR] = 1
@@ -817,7 +923,7 @@ func circuit_kind(id: int) -> int:
 	match id:
 		WIRE:
 			return 1
-		SWITCH, BUTTON, PRESSURE_PLATE, BATTERY, INVERTER:
+		SWITCH, BUTTON, PRESSURE_PLATE, BATTERY, INVERTER, OBSERVER, COMPARATOR:
 			return 2
 		LAMP, PISTON:
 			return 3
@@ -1691,6 +1797,227 @@ func _tile_image(id: int) -> Image:
 				img.set_pixel(clampi(x, 0, 15), clampi(y, 0, 15), Color(0.64, 0.32, 0.86))
 			_blob(img, 8, 8, 2, Color(0.46, 0.20, 0.64))
 			img.set_pixel(8, 8, Color(0.92, 0.82, 1.0))
+		T_ANVIL_TOP:
+			# the working face: blackened iron with a bright band worn into the middle
+			# by years of being hit
+			_flat(img, Color(0.20, 0.20, 0.23), 0.10, 118)
+			for y in range(3, 13):
+				for x in range(1, 15):
+					img.set_pixel(x, y, Color(0.29, 0.30, 0.33))
+			for y in range(5, 11):
+				for x in range(3, 13):
+					img.set_pixel(x, y, Color(0.40, 0.41, 0.44))
+			img.set_pixel(7, 7, Color(0.52, 0.53, 0.56))
+			img.set_pixel(9, 9, Color(0.52, 0.53, 0.56))
+		T_ANVIL_SIDE:
+			# the horn on the left, the waist under the face, the foot along the bottom
+			_flat(img, Color(0.22, 0.22, 0.25), 0.10, 119)
+			for x in range(0, 4):
+				for y in range(4, 9):
+					img.set_pixel(x, y, Color(0.30, 0.31, 0.34))
+			for y in range(3, 8):
+				for x in range(3, 15):
+					img.set_pixel(x, y, Color(0.31, 0.32, 0.35))
+			for y in range(8, 12):
+				for x in range(5, 12):
+					img.set_pixel(x, y, Color(0.17, 0.17, 0.19))
+			for y in range(12, 16):
+				for x in range(3, 14):
+					img.set_pixel(x, y, Color(0.26, 0.27, 0.30))
+		T_BREW_SIDE:
+			# a stone stand with a dark arch cut in it, where the flame sits
+			_flat(img, Color(0.44, 0.44, 0.46), 0.10, 120)
+			for y in range(9, 15):
+				for x in range(4, 12):
+					img.set_pixel(x, y, Color(0.20, 0.20, 0.22))
+			for y in range(14, 16):
+				for x in range(2, 14):
+					img.set_pixel(x, y, Color(0.34, 0.34, 0.36))
+			for i in 5:
+				img.set_pixel(2 + i, 3 + i, Color(0.56, 0.56, 0.59))
+				img.set_pixel(13 - i, 3 + i, Color(0.56, 0.56, 0.59))
+		T_BREW_TOP:
+			# the flame itself, and the ring of stone the bottles stand in
+			_flat(img, Color(0.38, 0.38, 0.40), 0.10, 121)
+			for y in range(3, 13):
+				for x in range(3, 13):
+					img.set_pixel(x, y, Color(0.24, 0.24, 0.26))
+			_blob(img, 8, 9, 3, Color(0.92, 0.48, 0.14))
+			_blob(img, 8, 9, 2, Color(0.98, 0.76, 0.22))
+			img.set_pixel(8, 7, Color(1.0, 0.94, 0.62))
+		T_HOPPER_TOP:
+			# a funnel mouth: a dark well with the bright rim of the cone around it
+			_flat(img, Color(0.30, 0.30, 0.33), 0.08, 122)
+			for y in TILE:
+				for x in TILE:
+					var dx := x - 7.5
+					var dy := y - 7.5
+					var d := sqrt(dx * dx + dy * dy)
+					if d > 6.5:
+						img.set_pixel(x, y, Color(0.40, 0.40, 0.43))
+					elif d < 3.0:
+						img.set_pixel(x, y, Color(0.15, 0.15, 0.17))
+		T_HOPPER_SIDE:
+			# the cone narrowing into the spout, with an iron band round the mouth
+			_flat(img, Color(0.30, 0.30, 0.33), 0.08, 123)
+			for y in range(0, 5):
+				for x in range(1, 15):
+					img.set_pixel(x, y, Color(0.42, 0.42, 0.45))
+			for y in range(5, 11):
+				var inset := 1 + int((y - 5) * 0.7)
+				for x in range(inset, TILE - inset):
+					img.set_pixel(x, y, Color(0.34, 0.34, 0.37))
+			for y in range(11, 16):
+				for x in range(6, 10):
+					img.set_pixel(x, y, Color(0.26, 0.26, 0.29))
+			for x in range(6, 10):
+				img.set_pixel(x, 10, Color(0.52, 0.52, 0.55))
+		T_OBSERVER_SIDE:
+			# a plain dark body with a seam round it, so it reads as a machine rather
+			# than as stone
+			_flat(img, Color(0.26, 0.26, 0.29), 0.08, 124)
+			for i in TILE:
+				img.set_pixel(i, 3, Color(0.18, 0.18, 0.20))
+				img.set_pixel(i, 12, Color(0.18, 0.18, 0.20))
+			for i in TILE:
+				img.set_pixel(3, i, Color(0.18, 0.18, 0.20))
+				img.set_pixel(12, i, Color(0.18, 0.18, 0.20))
+		T_OBSERVER_OFF:
+			# the face: a recessed panel with a dead eye in the middle
+			_flat(img, Color(0.22, 0.22, 0.25), 0.08, 125)
+			for y in range(3, 13):
+				for x in range(3, 13):
+					img.set_pixel(x, y, Color(0.30, 0.30, 0.33))
+			_blob(img, 8, 8, 2, Color(0.40, 0.40, 0.43))
+			_blob(img, 8, 8, 1, Color(0.16, 0.16, 0.18))
+		T_OBSERVER_ON:
+			# the same face with the eye lit, the way a lamp's tile lights
+			_flat(img, Color(0.22, 0.22, 0.25), 0.08, 126)
+			for y in range(3, 13):
+				for x in range(3, 13):
+					img.set_pixel(x, y, Color(0.30, 0.30, 0.33))
+			_blob(img, 8, 8, 2, Color(0.86, 0.24, 0.20))
+			_blob(img, 8, 8, 1, Color(0.99, 0.72, 0.62))
+		T_COMPARATOR_SIDE:
+			# stone with the groove the comparison runs down
+			_flat(img, Color(0.44, 0.44, 0.46), 0.10, 127)
+			for y in range(6, 10):
+				for x in range(0, 16):
+					img.set_pixel(x, y, Color(0.30, 0.30, 0.32))
+			for x in range(0, 16):
+				img.set_pixel(x, 15, Color(0.34, 0.34, 0.36))
+		T_COMPARATOR_OFF:
+			# the front: two dark dots, one per torch inside
+			_flat(img, Color(0.46, 0.46, 0.48), 0.10, 128)
+			_blob(img, 5, 8, 1, Color(0.20, 0.20, 0.22))
+			_blob(img, 10, 8, 1, Color(0.20, 0.20, 0.22))
+		T_COMPARATOR_ON:
+			# the same front with both torches lit
+			_flat(img, Color(0.46, 0.46, 0.48), 0.10, 129)
+			_blob(img, 5, 8, 1, Color(0.96, 0.30, 0.20))
+			_blob(img, 10, 8, 1, Color(0.96, 0.30, 0.20))
+		T_BEACON:
+			# a black glass case with the bright core behind it
+			_flat(img, Color(0.14, 0.18, 0.24), 0.06, 130)
+			for y in range(2, 14):
+				for x in range(2, 14):
+					var dx := x - 7.5
+					var dy := y - 7.5
+					var d := sqrt(dx * dx + dy * dy)
+					if d < 4.5:
+						img.set_pixel(x, y, Color(0.52, 0.92, 0.88))
+					elif d < 6.0:
+						img.set_pixel(x, y, Color(0.30, 0.52, 0.56))
+			_blob(img, 8, 8, 2, Color(0.94, 1.0, 0.98))
+			for i in TILE:
+				img.set_pixel(i, 0, Color(0.06, 0.08, 0.10))
+				img.set_pixel(i, TILE - 1, Color(0.06, 0.08, 0.10))
+			for i in TILE:
+					img.set_pixel(0, i, Color(0.06, 0.08, 0.10))
+					img.set_pixel(TILE - 1, i, Color(0.06, 0.08, 0.10))
+		T_RAIL:
+			# two steel rails on a row of wooden sleepers, drawn lying on the ground
+			_flat(img, Color(0.42, 0.30, 0.16), 0.10, 131)
+			for y in range(1, TILE, 4):
+				for x in range(1, TILE - 1):
+					img.set_pixel(x, y, Color(0.52, 0.36, 0.20))
+			for x in TILE:
+				img.set_pixel(x, 5, Color(0.72, 0.72, 0.76))
+				img.set_pixel(x, 6, Color(0.58, 0.58, 0.62))
+				img.set_pixel(x, 10, Color(0.72, 0.72, 0.76))
+				img.set_pixel(x, 11, Color(0.58, 0.58, 0.62))
+		T_NETHERRACK:
+			# raw, blood-red rock with darker pits and a few pale flecks: heavy per-pixel
+			# noise reads as static on a magnified 16x16 tile, so the variation is drawn in
+			# little blobs instead
+			_flat(img, Color(0.56, 0.19, 0.17), 0.08, 140)
+			for i in 16:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.42, 0.12, 0.11))
+			for i in 8:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.70, 0.27, 0.24))
+			for i in 5:
+				img.set_pixel(r.randi_range(1, TILE - 2), r.randi_range(1, TILE - 2),
+					Color(0.80, 0.40, 0.38))
+		T_SOUL_SAND:
+			# a dim brown sand with the three faces pressed into it
+			_flat(img, Color(0.35, 0.26, 0.20), 0.07, 141)
+			for i in 12:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.28, 0.20, 0.15))
+			for f in [Vector2i(4, 4), Vector2i(10, 5), Vector2i(6, 10)]:
+				for dx in 2:
+					for dy in 3:
+						img.set_pixel(f.x + dx, f.y + dy, Color(0.20, 0.15, 0.16))
+				img.set_pixel(f.x + 1, f.y + 1, Color(0.52, 0.42, 0.36))
+				img.set_pixel(f.x + 1, f.y + 3, Color(0.14, 0.10, 0.11))
+		T_NETHER_BRICK:
+			# dark, tightly laid bricks in staggered courses
+			_flat(img, Color(0.26, 0.16, 0.17), 0.05, 142)
+			for y in TILE:
+				if y % 4 == 3:
+					for x in TILE:
+						img.set_pixel(x, y, Color(0.16, 0.10, 0.11))
+			for y in range(0, TILE, 4):
+				var off := 0 if (y / 4) % 2 == 0 else 4
+				for x in range(off, TILE, 8):
+					for yy in 4:
+						img.set_pixel(x % TILE, y + yy, Color(0.18, 0.11, 0.12))
+		T_MAGMA:
+			# cooling lava: dark crust cracked open over a hot orange glow
+			_flat(img, Color(0.30, 0.10, 0.06), 0.10, 143)
+			for i in 14:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1),
+					r.randi_range(1, 2), Color(0.14, 0.05, 0.04))
+			for i in 12:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.95, 0.44, 0.06))
+			for i in 5:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(1.0, 0.80, 0.32))
+		T_QUARTZ_ORE:
+			# white quartz veins through red rock
+			_flat(img, Color(0.56, 0.19, 0.17), 0.08, 144)
+			for i in 14:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.42, 0.12, 0.11))
+			for i in 7:
+				_blob(img, r.randi_range(1, TILE - 2), r.randi_range(1, TILE - 2),
+					r.randi_range(1, 2), Color(0.90, 0.88, 0.90))
+		T_PORTAL:
+			# the swirl: violet bands over a dark core. It is drawn on the translucent
+			# material, so the alpha here is what lets the frame show through the doorway.
+			_flat(img, Color(0.36, 0.10, 0.58, 0.72), 0.12, 145)
+			for i in 22:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.62, 0.28, 0.92, 0.80))
+			for i in 12:
+				_blob(img, r.randi_range(0, TILE - 1), r.randi_range(0, TILE - 1), 1,
+					Color(0.20, 0.04, 0.40, 0.70))
+			for i in 6:
+				img.set_pixel(r.randi_range(1, TILE - 2), r.randi_range(1, TILE - 2),
+					Color(0.86, 0.72, 1.0, 0.85))
 	return img
 
 

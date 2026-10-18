@@ -55,7 +55,7 @@ template is used, since that is all a release build needs.
 | `Ctrl` | Sprint — hold it, or double-tap `W`, just like Minecraft (with a FOV kick) |
 | Mouse | Look |
 | **Left mouse** | Hold to mine (the block visibly cracks as you dig) |
-| **Right mouse** | Place the selected block, eat the selected food, or flip a switch / press a button / aim a relay |
+| **Right mouse** | Place the selected block, eat the selected food, flip a switch / press a button / aim a relay, or **hold** it to draw a bow |
 | **Middle mouse** | Pick the block you are looking at |
 | `1` … `9` / wheel | Select a hotbar slot |
 | `E` | Inventory, crafting and the block palette |
@@ -144,17 +144,87 @@ steel. Right-click a block of TNT to light its fuse; it burns for a couple of se
 and then goes off in the same blast a creeper makes. A dispenser, handed an arrow,
 launches it along your aim.
 
+**Archery**
+
+A bow is three sticks and three string. Hold right-click to draw it — a full draw takes a
+second — and let go to loose an arrow. The longer the draw, the faster and harder the shot:
+a flick of the button does nothing but click. Arrows come out of the quiver wherever they
+are in your bag, and a skeleton or a dispenser can hand you more.
+
+**Repair**
+
+An anvil is three blocks of iron over four ingots. Right-click one holding a worn tool or
+piece of armour and it is bought back to full durability for experience levels — the price
+rises with how far it has worn down, so topping up a nearly-new pick costs a level or two
+and a nearly-broken one costs a dozen. There is no panel: the price is a toast and the deal
+happens on the click.
+
 **Potions**
 
 Four potions are brewed in the crafting grid from a pane of glass and one reagent: a
 feather for Swiftness, a slimeball for Regeneration, a bone for Strength and glowstone
-for Night Vision. Each is drunk for a real effect — a faster walk, steady healing,
+for Night Vision. A **brewing stand** — a torch over three cobblestone — does the same
+trade without a table: right-click it holding the reagent. Each is drunk for a real
+effect — a faster walk, steady healing,
 harder hits, or a brightened world. Add gunpowder and it becomes a splash potion,
 thrown rather than drunk, that affects everything near where it lands.
 
+**Hopper**
+
+A hopper is five iron ingots round a chest. Put one under a chest and over another and it
+carries items a step down the line on its own, one every four-tenths of a second: it fills
+a matching stack before it takes an empty cell, and it pulls a furnace's finished output
+into the chest below. Nothing has to power it.
+
+**Observer & comparator**
+
+The power set has two parts that sense rather than store. An **observer** watches the cell
+it faces and pulses for a single tick whenever that block changes, so it turns a block
+being placed or broken into a signal. A **comparator** reads the container it is pointed
+away from and drives a level of 1..15 set by how many of its slots are filled, so a chest
+that is half full can open a door and a full one can hold it open. Both are aimed with a
+right-click, the way a relay is.
+
+**Beacon**
+
+Eight obsidian round a diamond make a beacon. Set it on a 3x3 of iron, gold or diamond
+blocks and it turns on: everyone within sixteen blocks gets Regeneration while they stay
+there. Take the base away and it is just a lamp — which it also is, since a beacon lights
+its own room whether or not it is doing anything else.
+
+**Vehicles**
+
+A **minecart** is five iron ingots in a U; a **boat** is the same shape in planks; a
+**rail** is six ingots round a stick, sixteen at a time. Right-click the ground with a cart
+or a boat in hand and it goes down as a vehicle rather than a block. Right-click one to get
+in, `Shift` to get out, and `W A S D` to steer: a cart rolls along at 7 blocks a second, and
+11 on rails, coasting to a stop when nobody is pushing it; a boat floats on water and is
+dragged by it. While you are riding, the vehicle is what moves and what collides, and the
+camera rides with it.
+
+**The Nether**
+
+Build a doorway: a ring of obsidian with at least a two-wide, three-tall hole in it.
+Obsidian is what a bucket of water poured on lava leaves behind, and a diamond pick is
+what it takes to move a piece once it has set. Light the hole with flint and steel and the
+doorway fills with the swirling portal — stand in it for a moment and it takes you through.
+
+The nether is a dimension of its own, not a cave under the overworld: a solid body of
+**netherrack** between a bedrock floor and a bedrock roof, carved through with big open
+caverns and floored with a sea of **lava**. **Glowstone** hangs in clusters from the
+ceiling, **soul sand** and **magma** lie across the low ground, and the rock is shot through
+with **nether quartz ore** — the dimension's own reward for digging. The sky is a red haze
+with no sun, no moon and no rain, and eight blocks walked here are one block of overworld
+distance, so the two doors stay paired.
+
+Everything on each side is kept apart: a chest in the nether and a chest at the same
+coordinates in the overworld are different chests, and so are their wire, their fluid and
+their facings. Travel back and forth as often as you like — the save keeps both dimensions
+whole, and the side you saved on is the side you load back into.
+
 **Advancements**
 
-Fifty milestones track how far you have come, in the spirit of Minecraft's
+Sixty milestones track how far you have come, in the spirit of Minecraft's
 advancements: break your first block, get wood, benchmark a crafting table, reach
 the Stone Age, smelt iron, find a diamond, trade with a villager, enchant a tool,
 draw your first copper wire. They are grouped into Getting Started, Mining, Building,
@@ -164,7 +234,7 @@ at the top of the screen with its icon, "Advancement Made!" and its name.
 Two of them are counted goals rather than a single event — break 100 blocks to become
 a Miner, place 200 to become an Architect — and two fire on a value rather than an
 event: reaching experience level 10 is *Experienced*. The full list, with what each
-one asks for and how many of the fifty you have earned, is on the **Advancements**
+one asks for and how many of the fifty-seven you have earned, is on the **Advancements**
 screen, opened from the pause menu; earned rows are lit and the rest are dimmed rather
 than hidden, so you can always see what there is left to aim for. Press `L` for it in
 game, or read the tally with `/progress` (and manage it with `/advancement grant|revoke`).
@@ -266,6 +336,16 @@ separate spawner keeps up to eight alive around whichever village is nearest the
 A villager is a robed, big-nosed humanoid that (unlike the animals) does not run from you,
 and right-clicking one opens a **trade**.
 
+A village also keeps an **iron golem** or two on watch: a big pale humanoid that never
+attacks you, never wanders off, and hits any hostile mob that comes near it for seven
+damage a swing. It is worth a handful of iron ingots if you kill it, which is the only
+honest source of iron that is not mining or smelting.
+
+A **wandering trader** turns up on its own, rarely, wherever you are standing — one at a
+time, never in a village. It trades in the things a village does not: a diamond for four
+emeralds, slimeballs, gunpowder, cooked fish. It has no stall of its own and it does not
+run away.
+
 Each villager keeps one of four trades — Farmer, Butcher, Smith or Mason — chosen from
 where it stands rather than from any saved state, so a village's shopkeepers are the same
 every time without a byte of persistence. Every trade has two sides: the top offer buys
@@ -279,9 +359,11 @@ to get one is to trade for it.
 **World**
 
 * Infinite chunk-streamed terrain: continents, hills, mountains, oceans and beaches.
-* Six biomes — plains, forest, desert, snowy tundra, mountains, ocean — each with its
-  own surface blocks (grass, sand, snow, stone, gravel) and vegetation.
-* Oak trees with proper canopies, tall grass, poppies and dandelions, cacti in the desert.
+* Eight biomes — plains, forest, birch forest, desert, snowy tundra, mountains, beach,
+  ocean — each with its own surface blocks (grass, sand, snow, stone, gravel) and
+  vegetation.
+* Oak and birch trees with proper canopies, tall grass, poppies and dandelions, cacti in
+  the desert.
 * Winding cave systems carved by noise, reaching from y = 58 down to y = -24, with
   ore veins in depth bands: coal and copper high up, iron and gold in the middle, and
   diamonds below y = -40. The bands are absolute, so "diamonds are deep" means the same
@@ -289,16 +371,27 @@ to get one is to trade for it.
   be doing.
 * A 15-minute day/night cycle with a moving sun, moonlight, sky colours and fog that
   follows the time of day.
+* Weather on its own clock: long clear spells, shorter rain and the odd thunderstorm,
+  each lasting 35 to 120 seconds. Rain dims and desaturates the sky and drops a sheet of
+  falling water around you; a thunderstorm adds lightning flashes on top. `/weather
+  clear|rain|thunder` sets it at once.
 * Water you can swim and drown in, with an underwater fog and colour shift. Hold
   `Space` to swim up and `Shift` to dive; at the surface `Space` becomes a real
   jump, strong enough to climb out onto a one-block shore.
 
 **Building**
 
-* 47 block types: stone, grass, dirt, cobblestone, planks, logs, leaves, sand,
+* 129 block ids — stone, grass, dirt, cobblestone, planks, logs, leaves, sand,
   sandstone, glass, bricks, stone bricks, glowstone, obsidian, snow, ice, cactus,
-  torches, crafting tables, chests, doors, ladders, fences, glass panes, four ore
-  blocks, blocks of iron / gold / diamond, bedrock, and the whole power set below.
+  torches, crafting tables, chests, doors, ladders, fences, glass panes, slabs, stairs,
+  trapdoors, fence gates, signs, birch wood, beds, an enchanting table, an anvil, a
+  brewing stand, a hopper, a beacon, a rail, farmland and the wheat / carrot / potato
+  crops, sixteen wool colours and their carpets, TNT and a dispenser, four ore blocks,
+  blocks of iron / gold / diamond, bedrock, lava, the whole power set below —
+  including the observer and the comparator — and the nether's own set: netherrack,
+  soul sand, nether bricks, magma and nether quartz ore, with the portal as the
+  doorway they light into. (The count includes every crop stage and every open /
+  closed state, since each is an id of its own.)
 * Torches, glowstone, lit lamps and an extended piston are real light
   sources — a pool of point lights follows the nearest ones, so caves light up as
   you explore and a circuit lights its own room.
@@ -314,9 +407,11 @@ to get one is to trade for it.
   along the way you were facing, and taken apart together when either half is broken.
 * The **ender pearl** is thrown rather than placed: right-click hurls it at whatever the
   crosshair is on and you arrive where it lands, one pearl poorer.
-* Nine carried items on top of the blocks — stick, coal, iron, gold, diamond,
-  apple, bread, copper and a piston arm — each with a generated isometric or
-  flat icon, plus a dropped entity form for every one of them.
+* Many carried items on top of the blocks — stick, coal, iron, gold, diamond, apple,
+  bread, copper, a piston arm, carrot, potato, baked potato, shears, flint, flint and
+  steel, a fishing rod, a bow, raw fish, cooked fish, and four potions (each with a splash
+  form) — each with a generated isometric or flat icon, plus a dropped entity form for
+  every one of them.
 
 **Power (electricity)**
 
@@ -334,6 +429,9 @@ like Minecraft's redstone:
 | **Signal relay** | A diode with a delay: signal passes one way only, re-driven at full strength after 0.2 s. Right-click to aim it. |
 | **Lamp** | An indicator (an LED). Lights up when powered. |
 | **Piston** | An actuator (a solenoid). Powered, it shoves the block in front one cell on and pulls it back when released. |
+| **Observer** | An edge sensor: it watches the cell it faces and pulses for one tick whenever that block changes. Right-click to aim it. |
+| **Comparator** | A reader: it drives a level of 1..15 set by how many slots the container behind it has filled, so a chest can be read rather than only switched. Right-click to aim it. |
+| **Hopper** | A conveyor: one item every 0.4 s from the container above into the one below. Nothing powers it. |
 
 Copper is the conductor: copper ore drops copper ingots, and one ingot draws four
 wire. A wire block drops itself, so a run can be picked up and re-laid.
@@ -390,6 +488,16 @@ before it is handed to a worker thread.
 | 1 Glass + 1 Bone | 1 Potion of Strength |
 | 1 Glass + 1 Glowstone | 1 Potion of Night Vision |
 | 1 Potion + 1 Gunpowder | 1 Splash Potion |
+| 3 Sticks + 3 String | 1 Bow |
+| 3 Blocks of Iron + 4 Iron Ingot | 1 Anvil |
+| 1 Torch + 3 Cobblestone | 1 Brewing Stand |
+| 5 Iron Ingot + 1 Chest | 1 Hopper |
+| 8 Cobblestone + 1 Copper Ingot | 1 Observer |
+| 4 Stone + 1 Copper Ingot | 1 Comparator |
+| 8 Obsidian + 1 Diamond | 1 Beacon |
+| 5 Iron Ingot (U) | 1 Minecart |
+| 5 Oak Planks (U) | 1 Boat |
+| 6 Iron Ingot + 1 Stick (rails) | 16 Rails |
 
 The crafting screen lists every one of these, generated from the recipe table
 itself rather than hand-written, so the list can never describe a recipe the
@@ -486,6 +594,7 @@ server's admin surface in multiplayer (see [`MULTIPLAYER.md`](MULTIPLAYER.md) §
 | `/give <block> [count]` | Put a stack in your bag | operator |
 | `/clear` | Empty the bag | operator |
 | `/time set <day\|noon\|night\|midnight\|0..1>` | Set the time of day | operator |
+| `/weather <clear\|rain\|thunder>` | Set the weather at once | operator |
 | `/tp <x> <y> <z>`, `/spawn` | Teleport | operator |
 | `/fly [on\|off]`, `/heal`, `/kill` | Flight, refill, die | operator |
 | `/fog <scale\|auto>` | Stretch the distant fog | operator |
@@ -778,6 +887,15 @@ because an error there is invisible by eye on a 4-pixel limb:
   command entry point. The last two checks run straight over the definition table — every milestone is
   in a real group and has a drawable icon — so a milestone that stops matching its event
   is caught rather than silently missing.
+* **the nether is checked as a dimension, not as a decoration**: a chunk generated with the
+  nether flag must have a bedrock floor and a bedrock roof, a lava sea, a mostly-open
+  cavern interior and quartz in its rock, and must come out byte-identical on a second run
+  with the same seed; its spawn must stand clear of the lava. Then a hand-built obsidian
+  ring is lit through the real `ignite_portal`, the doorway is required to fill with portal
+  blocks, an open pocket of air is required **not** to light — and the player is left
+  standing in the doorway and driven by the ordinary per-frame check until the world has
+  actually changed dimension, streamed the nether's own chunks, and (through the arrival
+  doorway) come back to the overworld.
 
 It also builds a **synthetic chunk of ocean** (seabed, water up to sea level, and a
 one-block sand bank) and runs the real chunk mesher over it, then swims the player
@@ -827,8 +945,10 @@ chunk). There are also
 `advancements` (the progress screen, with a spread of milestones earned and two counted
 goals part-way through) and `advpopup` (the "Advancement Made!" banners mid-flight at
 the top of the play screen),
-`--terrain-stats`, `--diag`, `--winding` and `--dump-atlas`
-diagnostics used while tuning generation, lighting and mesh winding.
+`nether` (three looks at the dimension — on its floor, over the cavern from above, and
+down at the lava sea from a low ledge),
+`--terrain-stats`, `--diag`, `--winding`, `--dump-atlas` and `--dump-icons`
+diagnostics used while tuning generation, lighting, mesh winding and the item icons.
 
 `--winding` is worth calling out: it compares the triangle winding of the built-in
 `BoxMesh` against our generated meshes by taking the cross product of each triangle

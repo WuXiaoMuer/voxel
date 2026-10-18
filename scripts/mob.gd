@@ -106,6 +106,27 @@ const TYPES := {
 		"arm_col": "5a3a22", "sound": "mob_grunt",
 		"nose": "b07f52", "nose_size": [2, 2, 2],
 	},
+	# ---- a village's guard. Not hostile (it never attacks the player) but `guard: true`
+	# makes it hunt hostiles and hit them hard, and it neither wanders off nor flees. Big
+	# boxes and pale iron colouring are what make it read as a golem rather than a person.
+	"iron_golem": {
+		"shape": "human", "hostile": false, "burn": false, "speed": 1.0,
+		"flee": false, "guard": true, "health": 100.0,
+		"body": [14, 16, 8], "head": [8, 8, 8], "leg": [5, 14, 5], "arms": [6, 16, 6],
+		"body_col": "c8c8c0", "head_col": "d8d8d0", "leg_col": "b0b0a8",
+		"arm_col": "c0c0b8", "sound": "mob_low",
+		"nose": "a8a8a0", "nose_size": [3, 3, 2],
+	},
+	# ---- a trader. It wanders the wild rather than living in a village, is never in the
+	# animal spawner's roster, and always keeps the one "Trader" profession.
+	"wandering_trader": {
+		"shape": "human", "hostile": false, "burn": false, "speed": 1.2,
+		"flee": false, "health": 20.0,
+		"body": [8, 12, 4], "head": [8, 8, 8], "leg": [4, 12, 4], "arms": [4, 12, 4],
+		"body_col": "2a4a7a", "head_col": "c89858", "leg_col": "1e3a60",
+		"arm_col": "24406a", "sound": "mob_grunt",
+		"nose": "b8864a", "nose_size": [2, 2, 2],
+	},
 }
 
 signal died(kind: String, pos: Vector3)
@@ -571,6 +592,30 @@ func tick(delta: float, player_pos: Vector3) -> void:
 func _tick_passive(delta: float, player_pos: Vector3) -> float:
 	if tamed:
 		return _tick_tamed(delta, player_pos)
+	# A guard patrols: it does not wander off and it does not run from you. What it does is
+	# look for a hostile mob, close on it, and hit it hard -- which is the whole reason a
+	# village has one.
+	if bool(def.get("guard", false)):
+		var prey = _nearest_hostile(14.0)
+		if prey != null:
+			var to: Vector3 = prey.global_position - global_position
+			to.y = 0.0
+			if to.length() > 0.01:
+				_dir = to.normalized()
+				facing = atan2(_dir.x, _dir.z)
+			if to.length() < 2.4 and _atk_cd <= 0.0:
+				_atk_cd = 1.1
+				prey.hurt_mob(7.0, global_position)
+			return float(def.get("speed", 1.0))
+		_state_t -= delta
+		if _state_t <= 0.0:
+			_state = 1 - _state
+			_state_t = randf_range(3.0, 7.0)
+			facing = randf() * TAU
+		if _state == 1:
+			_dir = Vector3(sin(facing), 0, cos(facing))
+			return float(def.get("speed", 1.0)) * 0.6
+		return 0.0
 	_state_t -= delta
 	if _state_t <= 0.0:
 		if _state == 0:

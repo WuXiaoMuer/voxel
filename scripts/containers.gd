@@ -7,6 +7,9 @@ extends Node
 
 const CHEST_SIZE := 27
 const COOK_TIME := 8.0
+## A hopper moves one item per this many seconds, the way Minecraft's does: slow enough to
+## watch, fast enough that a line of them drains a chest in a reasonable time.
+const HOPPER_INTERVAL := 0.4
 
 signal changed
 
@@ -15,15 +18,78 @@ var player = null
 var item_entities = null
 var chests: Dictionary = {}     # Vector3i -> Array(27) of {id, count}
 var furnaces: Dictionary = {}   # Vector3i -> {input, fuel, output, burn, burn_max, cook}
+## Where the hoppers are. Rebuilt from the edit list on the first tick after a world loads
+## -- save loading writes bytes directly rather than through the seam, so it does not raise
+## `block_changed` and the hooks below would miss every hopper that came out of a save.
+var hoppers: Dictionary = {}
+var _hopper_t := 0.0
+var _need_scan := true
+## Which dimension these chests and furnaces belong to. A chest at a given coordinate in the
+## nether and one at the same coordinate in the overworld are different chests, so the
+## contents travel with the dimension: `set_dimension` swaps the three dictionaries for the
+## other dimension's, kept whole in `_store`.
+var dim := 0
+var _store: Dictionary = {}
 
 
 func setup(w) -> void:
 	world = w
+	_need_scan = true
+	if world != null and world.has_signal("block_changed"):
+		var cb := Callable(self, "_on_block_changed")
+		if not world.block_changed.is_connected(cb):
+			world.block_changed.connect(cb)
+
+
+## Swaps in another dimension's chests, furnaces and hoppers. Called by main when the world
+## changes dimension, alongside `world.set_dimension`.
+func set_dimension(d: int) -> void:
+	if d == dim:
+		return
+	_store[dim] = {"chests": chests, "furnaces": furnaces, "hoppers": hoppers}
+	dim = d
+	var s = _store.get(d)
+	if s == null:
+		chests = {}
+		furnaces = {}
+		hoppers = {}
+	else:
+		chests = s["chests"]
+		furnaces = s["furnaces"]
+		hoppers = s["hoppers"]
+	_need_scan = true
+
+
+## A dimension's contents as the dictionaries the live names point at, or its store record.
+func _view(d: int) -> Dictionary:
+	if d == dim:
+		return {"chests": chests, "furnaces": furnaces, "hoppers": hoppers}
+	_ensure_dim(d)
+	var s: Dictionary = _store.get(d, {})
+	return s
+
+
+func _ensure_dim(d: int) -> void:
+	if d == dim or _store.has(d):
+		return
+	_store[d] = {"chests": {}, "furnaces": {}, "hoppers": {}}
+
+
+## A hopper placed or broken anywhere: it joins or leaves the tick list.
+func _on_block_changed(pos: Vector3i, id: int) -> void:
+	if id == Blocks.HOPPER:
+		hoppers[pos] = true
+	elif hoppers.has(pos):
+		hoppers.erase(pos)
 
 
 func reset() -> void:
 	chests.clear()
 	furnaces.clear()
+	hoppers.clear()
+	_store.clear()
+	dim = 0
+	_need_scan = true
 
 
 # ================================================================ access
@@ -71,11 +137,102 @@ func _spill(cells: Array, pos: Vector3i) -> void:
 
 # ================================================================ furnace tick
 func update(delta: float) -> void:
-	if world == null or furnaces.is_empty():
+	if world == null:
 		return
-	for k in furnaces.keys():
+	if _need_scan:
+		_need_scan = false
+		_scan_hoppers()
+	if not furnaces.is_empty():
+		for k in furnaces.keys():
+			var pos: Vector3i = k
+			_tick_furnace(pos, delta)
+	if not hoppers.is_empty():
+		_tick_hoppers(delta)
+
+
+## Find every hopper that is already in the world -- the ones that came out of a save
+## rather than out of a hand.
+func _scan_hoppers() -> void:
+	hoppers.clear()
+	for k in world.edits.keys():
 		var pos: Vector3i = k
-		_tick_furnace(pos, delta)
+		if world.get_block(pos.x, pos.y, pos.z) == Blocks.HOPPER:
+			hoppers[pos] = true
+
+
+## Hoppers work on a slow clock of their own rather than every frame: each one takes an item
+## out of whatever holds it above and puts it into whatever takes it below.
+func _tick_hoppers(delta: float) -> void:
+	_hopper_t -= delta
+	if _hopper_t > 0.0:
+		return
+	_hopper_t = HOPPER_INTERVAL
+	for k in hoppers.keys():
+		var pos: Vector3i = k
+		if world.get_block(pos.x, pos.y, pos.z) != Blocks.HOPPER:
+			hoppers.erase(pos)
+			continue
+		if _hopper_step(pos):
+			changed.emit()
+
+
+## One item, one cell down. True when something actually moved.
+func _hopper_step(pos: Vector3i) -> bool:
+	var src := _cells_at(pos + Vector3i(0, 1, 0), true)
+	var dst := _cells_at(pos + Vector3i(0, -1, 0), false)
+	if src.is_empty() or dst.is_empty():
+		return false
+	return _move_one(src, dst)
+
+
+## The cells a hopper can pull from (the container above: a chest's whole contents, or a
+## furnace's finished output) or push into (the container below: a chest, or a furnace's
+## input and then its fuel).
+func _cells_at(pos: Vector3i, from_above: bool) -> Array:
+	var id: int = world.get_block(pos.x, pos.y, pos.z)
+	match id:
+		Blocks.CHEST:
+			return chest_at(pos)
+		Blocks.FURNACE, Blocks.FURNACE_LIT:
+			var f: Dictionary = furnace_at(pos)
+			if from_above:
+				return [f["output"]]
+			return [f["input"], f["fuel"]]
+	return []
+
+
+## Move *one* item from the first non-empty cell to the first cell that will take it. One,
+## not the whole stack: a hopper is a slow conveyor, and a chest it fills should end up with
+## a tidy stack rather than one dump. Matching stacks are topped up before empty cells are
+## used, so a second chest of the same thing fills up before the next one starts.
+func _move_one(src: Array, dst: Array) -> bool:
+	for c in src:
+		var id := int(c["id"])
+		if id <= 0 or int(c["count"]) <= 0:
+			continue
+		var room := Items.max_stack(id)
+		for d in dst:
+			if int(d["id"]) != id or int(d["count"]) >= room:
+				continue
+			d["count"] = int(d["count"]) + 1
+			_take_from(c, 1)
+			return true
+		for d2 in dst:
+			if int(d2["id"]) != 0:
+				continue
+			d2["id"] = id
+			d2["count"] = 1
+			_take_from(c, 1)
+			return true
+		return false
+	return false
+
+
+func _take_from(cell: Dictionary, n: int) -> void:
+	cell["count"] = int(cell["count"]) - n
+	if int(cell["count"]) <= 0:
+		cell["id"] = 0
+		cell["count"] = 0
 
 
 func _tick_furnace(pos: Vector3i, delta: float) -> void:
@@ -139,10 +296,17 @@ func _apply_lit(pos: Vector3i, lit: bool) -> void:
 
 # ================================================================ persistence
 func serialize() -> PackedByteArray:
+	return serialize_dim(dim)
+
+
+func serialize_dim(d: int) -> PackedByteArray:
+	var v := _view(d)
+	var cs: Dictionary = v["chests"]
+	var fs: Dictionary = v["furnaces"]
 	var body := PackedByteArray()
 	var n := 0
-	for k in chests.keys():
-		var arr: Array = chests[k]
+	for k in cs.keys():
+		var arr: Array = cs[k]
 		if not _has_items(arr):
 			continue
 		body.append(0)
@@ -153,8 +317,8 @@ func serialize() -> PackedByteArray:
 		for c in arr:
 			body.append_array(_cell_bytes(c))
 		n += 1
-	for k2 in furnaces.keys():
-		var f: Dictionary = furnaces[k2]
+	for k2 in fs.keys():
+		var f: Dictionary = fs[k2]
 		body.append(1)
 		body.append_array(_s32(k2.x))
 		body.append_array(_s32(k2.y))
@@ -172,12 +336,20 @@ func serialize() -> PackedByteArray:
 
 
 func load_state(buf: PackedByteArray) -> void:
+	load_state_dim(dim, buf)
+
+
+func load_state_dim(d: int, buf: PackedByteArray) -> void:
 	if buf.size() < 8:
 		return
 	if buf.slice(0, 4).get_string_from_ascii() != "VCB1":
 		return
-	chests.clear()
-	furnaces.clear()
+	_ensure_dim(d)
+	var v := _view(d)
+	var cs: Dictionary = v["chests"]
+	var fs: Dictionary = v["furnaces"]
+	cs.clear()
+	fs.clear()
 	var n := buf.decode_s32(4)
 	var off := 8
 	for i in n:
@@ -194,7 +366,7 @@ func load_state(buf: PackedByteArray) -> void:
 			for j in cnt:
 				arr.append(_read_cell(buf, off))
 				off += 4
-			chests[pos] = arr
+			cs[pos] = arr
 		elif t == 1:
 			var inp := _read_cell(buf, off)
 			off += 4
@@ -206,7 +378,7 @@ func load_state(buf: PackedByteArray) -> void:
 			off += 4
 			var cook := buf.decode_float(off)
 			off += 4
-			furnaces[pos] = {"input": inp, "fuel": fu, "output": ou,
+			fs[pos] = {"input": inp, "fuel": fu, "output": ou,
 				"burn": burn, "burn_max": burn, "cook": cook}
 
 

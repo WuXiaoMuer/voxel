@@ -162,6 +162,27 @@ func _build() -> void:
 			"Brew a potion and drink it.", "potion"),
 		_d("dispenser", "industry", Blocks.DISPENSER, "Automatic",
 			"Craft a dispenser.", ["craft", "place"], {"want": [Blocks.DISPENSER]}),
+		_d("archer", "adventure", Blocks.ITEM_BOW, "Archer",
+			"Loose an arrow from a bow you drew yourself.", "bow"),
+		_d("repair", "adventure", Blocks.ANVIL, "Good as New",
+			"Repair a worn tool on an anvil.", "repair"),
+		_d("brew", "industry", Blocks.BREWING_STAND, "Brewer",
+			"Brew a potion at a brewing stand.", "brew"),
+		_d("observer", "industry", Blocks.OBSERVER, "Watcher",
+			"Place an observer.", ["craft", "place"], {"want": [Blocks.OBSERVER]}),
+		_d("comparator", "industry", Blocks.COMPARATOR, "Comparison",
+			"Place a comparator.", ["craft", "place"], {"want": [Blocks.COMPARATOR]}),
+		_d("beacon", "industry", Blocks.BEACON, "Lighthouse",
+			"Place a beacon.", ["craft", "place"], {"want": [Blocks.BEACON]}),
+		_d("ride", "adventure", Blocks.ITEM_MINECART, "Traveller",
+			"Ride in a cart or a boat.", "ride"),
+		# ---- the nether
+		_d("nether", "adventure", Blocks.NETHER_PORTAL, "Into the Fire",
+			"Step through a nether portal.", "nether"),
+		_d("netherrack", "mining", Blocks.NETHERRACK, "Down Below",
+			"Dig up a block of netherrack.", "break", {"want": [Blocks.NETHERRACK]}),
+		_d("quartz", "mining", Blocks.ITEM_NETHER_QUARTZ, "Shiny Quartz",
+			"Mine nether quartz ore.", "break", {"want": [Blocks.NETHER_QUARTZ_ORE]}),
 	]
 
 	_by_id = {}

@@ -54,6 +54,26 @@ const B_MOUNTAIN := 6
 ## A second kind of forest rather than a second kind of tree: what you find underfoot
 ## tells you which one you are in, so a birch wood is birch, not "forest, again".
 const B_BIRCH_FOREST := 7
+## The nether is its own biome, the way it is in Minecraft: what the F3 screen reports and
+## what the weather and the spawner read have to agree that you are not in the overworld.
+const B_NETHER := 8
+
+## Which dimension a generator builds. 0 is the overworld above, 1 is the nether below.
+## A world holds one generator per dimension, so `fill_chunk` has to know which one it is
+## being asked to produce.
+var dim := 0
+
+# ---------------------------------------------------------------- nether layout
+## The nether is a solid body of rock between a bedrock floor and a bedrock roof, with the
+## caverns carved out of the middle. It is capped at 96 rather than the world's 320 so a
+## chunk costs eleven sections to store, not twenty.
+const NETHER_ROOF := 96
+## Where the lava sea sits. Everything the carve opened below this becomes lava, which is
+## both the nether's floor hazard and where a lava bucket comes from.
+const NETHER_LAVA := 31
+## The top of the walkable nether: the roof blocks hang below the bedrock cap, so a cavern
+## that reaches the roof is still closed overhead.
+const NETHER_TOP := NETHER_ROOF - 1
 
 ## Tree kinds, as carried in `tree_at`'s "kind".
 const TREE_OAK := 0
@@ -87,10 +107,15 @@ var _n_cave2 := FastNoiseLite.new()
 ## Two jobs: which kind of forest grows here, and how thick it is. A single low-frequency
 ## field means a wood has groves and clearings instead of an even sprinkle of trunks.
 var _n_forest := FastNoiseLite.new()
+## The nether's two carving fields. Deliberately lower frequency than the overworld's cave
+## noise: a nether is big open caverns, not the narrow winding tunnels a mineshaft wants.
+var _n_net := FastNoiseLite.new()
+var _n_net2 := FastNoiseLite.new()
 
 
-func _init(s: int) -> void:
+func _init(s: int, d: int = 0) -> void:
 	seed_value = s
+	dim = d
 	_n_cont.seed = s
 	_n_cont.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_n_cont.frequency = 0.0022
@@ -140,6 +165,19 @@ func _init(s: int) -> void:
 	_n_cave2.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_n_cave2.fractal_octaves = 3
 
+	_n_net.seed = s + 11
+	_n_net.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_net.frequency = 0.013
+	_n_net.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_n_net.fractal_octaves = 3
+	_n_net.fractal_gain = 0.5
+
+	_n_net2.seed = s + 12
+	_n_net2.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_n_net2.frequency = 0.028
+	_n_net2.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_n_net2.fractal_octaves = 2
+
 
 # ================================================================ hashing
 func hash3(a: int, b: int, c: int) -> int:
@@ -182,6 +220,8 @@ func forest_at(wx: int, wz: int) -> float:
 
 
 func biome_at(wx: int, wz: int) -> int:
+	if dim == 1:
+		return B_NETHER
 	return biome_from_height(wx, wz, height_at(wx, wz))
 
 
@@ -409,6 +449,8 @@ class Volume:
 ##   {"sections": {section: PackedByteArray(4096)}, "occ": {section: occluder count}}
 ## with section arrays indexed lx + lz*16 + ly*256.
 func fill_chunk(cx: int, cz: int) -> Dictionary:
+	if dim == 1:
+		return _fill_nether(cx, cz)
 	const M := 3              # margin for trees whose canopy crosses the border
 	const EW := CHUNK + M * 2
 
@@ -927,6 +969,169 @@ func cave_stats() -> Dictionary:
 	return {"n": n, "carved": carved, "carve_frac": float(carved) / float(n)}
 
 
+# ================================================================ the nether
+## A hash that folds in the world seed, so the nether's quartz, glowstone and soul sand
+## move when the seed does. `hash3` is seed-independent on purpose (a tree sits in the same
+## place on every world); the nether's features are not, or every world's nether would be
+## the same cave.
+func _nhash(a: int, b: int, c: int) -> int:
+	return hash3(a + seed_value * 131, b, c - seed_value * 37)
+
+
+## Whether the carve opens a cell. A low-frequency field for the big chambers, plus a
+## higher one that eats into their walls so the nether is not a set of smooth bubbles.
+func nether_carve(x: int, y: int, z: int) -> bool:
+	if absf(_n_net.get_noise_3d(float(x), float(y), float(z))) < 0.24:
+		return true
+	return absf(_n_net2.get_noise_3d(float(x), float(y), float(z))) < 0.11
+
+
+## Whether a cell comes out as solid rock. The carve is sampled on a 2-block grid and each
+## positive sample fills its whole 2x2x2 cell, so every cell in a group shares one answer --
+## `& ~1` maps a world coordinate onto that group's sample point.
+func nether_solid(wx: int, wy: int, wz: int) -> bool:
+	return not nether_carve(wx & ~1, wy & ~1, wz & ~1)
+
+
+## The y of the nether's walkable floor in a column: the highest rock the carve left, with
+## open air above it and clear of the lava sea. -1 when the column is open to the lava.
+## The spawn search reads the generator directly (the chunks it would otherwise read do not
+## exist yet), so this has to be the same predicate the carve uses, not a second guess at it.
+func nether_floor_at(wx: int, wz: int) -> int:
+	var y := NETHER_TOP
+	while y > NETHER_LAVA + 1:
+		if nether_solid(wx, y, wz) and not nether_solid(wx, y + 1, wz):
+			return y
+		y -= 1
+	return -1
+
+
+func _fill_nether(cx: int, cz: int) -> Dictionary:
+	var sec_lo := sec_of(MIN_Y)
+	var sec_hi := sec_of(NETHER_ROOF)
+	var volume := Volume.new(sec_lo * SEC, (sec_hi - sec_lo + 1) * SEC)
+	var ox := cx * CHUNK
+	var oz := cz * CHUNK
+
+	# ---- the solid body: netherrack between a bedrock floor and a bedrock roof
+	for x in CHUNK:
+		for z in CHUNK:
+			volume.put_run(x, z, MIN_Y + 1, NETHER_ROOF, Blocks.NETHERRACK)
+			volume.put(x, MIN_Y, z, Blocks.BEDROCK)
+			if _nhash(ox + x, 5, oz + z) % 3 == 0:
+				volume.put(x, MIN_Y + 1, z, Blocks.BEDROCK)
+			volume.put(x, NETHER_ROOF, z, Blocks.BEDROCK)
+
+	# ---- the caverns. Sampled on a 2-block grid and stamped two cells at a time, exactly
+	# the way the overworld's caves are: the carve is a third of the chunk's cost otherwise.
+	var y := MIN_Y + 2
+	while y <= NETHER_TOP:
+		for x in range(0, CHUNK, 2):
+			for z in range(0, CHUNK, 2):
+				if not nether_carve(ox + x, y, oz + z):
+					continue
+				for dy in 2:
+					var py := y + dy
+					if py > NETHER_TOP:
+						continue
+					for dx in 2:
+						for dz in 2:
+							volume.put(x + dx, py, z + dz, Blocks.AIR)
+		y += 2
+
+	# ---- the lava sea, filled after the carve so it settles into the open rather than
+	# being cut away by it
+	for x in CHUNK:
+		for z in CHUNK:
+			for yy in range(MIN_Y + 1, NETHER_LAVA):
+				if volume.at(x, yy, z) == Blocks.AIR:
+					volume.put(x, yy, z, Blocks.LAVA)
+
+	_nether_features(cx, cz, volume)
+	return volume.out()
+
+
+## Scatters the nether's contents through an already-carved chunk: quartz veins in the
+## rock, glowstone clusters hanging from the roof, and patches of soul sand and magma on
+## the floors. Every one is decided from the seed and the cell, so two chunks that meet at a
+## border agree about what stands on it.
+func _nether_features(cx: int, cz: int, volume: Volume) -> void:
+	var ox := cx * CHUNK
+	var oz := cz * CHUNK
+
+	# ---- quartz veins: the reward for digging, scattered through the rock. Placed in the
+	# *solid* body, so the vein has a wall to be seen in rather than floating in a cavern.
+	for v in 22:
+		var lx := _nhash(ox + v, 700 + v, oz) % CHUNK
+		var lz := _nhash(ox, 800 + v, oz + v) % CHUNK
+		var ly := NETHER_LAVA + 2 + _nhash(ox + v, 900 + v, oz + v) \
+			% (NETHER_TOP - NETHER_LAVA - 2)
+		var rad := 1 + _nhash(ox, 1000 + v, oz) % 2
+		for dy in range(-rad, rad + 1):
+			for dx in range(-rad, rad + 1):
+				for dz in range(-rad, rad + 1):
+					if absi(dx) + absi(dy) + absi(dz) > rad + 1:
+						continue
+					var px := lx + dx
+					var pz := lz + dz
+					var py := ly + dy
+					if px < 0 or pz < 0 or px >= CHUNK or pz >= CHUNK:
+						continue
+					if volume.at(px, py, pz) == Blocks.NETHERRACK:
+						volume.put(px, py, pz, Blocks.NETHER_QUARTZ_ORE)
+
+	# ---- glowstone: clusters that hang from the roof wherever a cavern has reached it
+	for g in 10:
+		var gx := _nhash(ox + g, 1100 + g, oz) % CHUNK
+		var gz := _nhash(ox, 1200 + g, oz + g) % CHUNK
+		# start at the ceiling and walk down to the first open cell, so the cluster sits
+		# under the rock rather than buried in it
+		var gy := NETHER_ROOF - 1
+		while gy > NETHER_LAVA and volume.at(gx, gy, gz) != Blocks.AIR:
+			gy -= 1
+		if gy <= NETHER_LAVA:
+			continue
+		var r2 := 1 + _nhash(ox + g, 1300 + g, oz) % 2
+		for dy in range(0, r2 + 1):
+			for dx in range(-r2, r2 + 1):
+				for dz in range(-r2, r2 + 1):
+					if dx * dx + dz * dz > r2 * r2:
+						continue
+					var px2 := gx + dx
+					var pz2 := gz + dz
+					if px2 < 0 or pz2 < 0 or px2 >= CHUNK or pz2 >= CHUNK:
+						continue
+					var py2 := gy - dy
+					if volume.at(px2, py2, pz2) != Blocks.AIR:
+						continue
+					if dy == r2 and volume.at(px2, py2 + 1, pz2) == Blocks.AIR:
+						continue
+					volume.put(px2, py2, pz2, Blocks.GLOWSTONE)
+
+	# ---- the floors: soul sand up against the lava, magma on the hotter ledges
+	for x in CHUNK:
+		for z in CHUNK:
+			var top := -1
+			var yy2 := NETHER_TOP
+			while yy2 > NETHER_LAVA:
+				if volume.at(x, yy2, z) != Blocks.AIR:
+					top = yy2
+					break
+				yy2 -= 1
+			if top < 0 or volume.at(x, top, z) != Blocks.NETHERRACK:
+				continue
+			# only a real floor, one with open air above it: a column that is solid all the
+			# way to the roof has no ground to put soul sand on, and decorating its underside
+			# would be magma hanging from the ceiling
+			if volume.at(x, top + 1, z) != Blocks.AIR:
+				continue
+			var h := _nhash(ox + x, 1400, oz + z)
+			if top <= NETHER_LAVA + 6 and h % 100 < 45:
+				volume.put(x, top, z, Blocks.SOUL_SAND)
+			elif h % 1000 < 40:
+				volume.put(x, top, z, Blocks.MAGMA)
+
+
 func biome_name(b: int) -> String:
 	match b:
 		B_OCEAN:
@@ -945,12 +1150,16 @@ func biome_name(b: int) -> String:
 			return "Snowy Tundra"
 		B_MOUNTAIN:
 			return "Mountains"
+		B_NETHER:
+			return "The Nether"
 	return "Unknown"
 
 
 # ================================================================ spawn
 ## Finds a comfortable place to spawn near the origin (dry, reasonably flat land).
 func find_spawn() -> Vector3:
+	if dim == 1:
+		return _nether_spawn()
 	var best := Vector3.ZERO
 	var best_score := -1e9
 	for radius in range(0, 90, 2):
@@ -995,3 +1204,42 @@ func find_spawn() -> Vector3:
 	if best_score > -1e8:
 		return best
 	return Vector3(0.5, float(SEA + 8), 0.5)
+
+
+## A safe landing in the nether: a column with real rock under it and none within a couple
+## of blocks of it, so the player does not arrive standing in lava. Searched outward from
+## the origin the way the overworld's spawn is, because the chunks do not exist yet and the
+## only thing that can be asked is the generator itself.
+func _nether_spawn() -> Vector3:
+	var fallback := Vector3(0.5, float(NETHER_LAVA + 8), 0.5)
+	# anything standable is remembered as a second-best answer, so a world whose only floors
+	# are rough still gets a real one instead of the blind fallback
+	var rough := Vector3.ZERO
+	var have_rough := false
+	for radius in range(0, 120, 2):
+		for a in range(0, maxi(1, radius * 4)):
+			var ang := TAU * float(a) / float(maxi(1, radius * 4))
+			var wx := int(cos(ang) * float(radius))
+			var wz := int(sin(ang) * float(radius))
+			var fy := nether_floor_at(wx, wz)
+			# well clear of the lava, with open headroom above the floor
+			if fy < NETHER_LAVA + 4 or fy > NETHER_TOP - 4:
+				continue
+			if not nether_solid(wx, fy, wz):
+				continue
+			if not have_rough:
+				rough = Vector3(float(wx) + 0.5, float(fy) + 1.05, float(wz) + 0.5)
+				have_rough = true
+			# a small flat shelf: the four neighbours within one block of the same height
+			var flat := true
+			for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var nf := nether_floor_at(wx + d.x, wz + d.y)
+				if nf < 0 or absi(nf - fy) > 1:
+					flat = false
+					break
+			if not flat:
+				continue
+			return Vector3(float(wx) + 0.5, float(fy) + 1.05, float(wz) + 0.5)
+	if have_rough:
+		return rough
+	return fallback

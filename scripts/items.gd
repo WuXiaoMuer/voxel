@@ -162,6 +162,29 @@ func _ready() -> void:
 		Blocks.ITEM_POTION_SPLASH_REGEN: "Throw it to heal everything close by.",
 		Blocks.ITEM_POTION_SPLASH_STRENGTH: "Throw it to strengthen everything close by.",
 		Blocks.ITEM_POTION_SPLASH_NIGHT: "Throw it to light the dark around everything close by.",
+		Blocks.ITEM_BOW: "Hold right-click to draw it, then let go to loose an arrow.",
+		Blocks.ANVIL: "Right-click with a worn tool to repair it for experience levels.",
+		Blocks.BREWING_STAND: "Right-click holding a reagent to brew the potion it makes, "
+			+ "for a pane of glass.",
+		Blocks.HOPPER: "Takes an item out of the container above and puts it in the one below.",
+		Blocks.OBSERVER: "Watches the block it faces and pulses for a moment whenever it "
+			+ "changes. Right-click to aim it.",
+		Blocks.COMPARATOR: "Drives a level set by how full the container behind it is. "
+			+ "Right-click to aim it.",
+		Blocks.BEACON: "On a 3x3 base of iron, gold or diamond blocks it heals everyone "
+			+ "close by. It lights the room either way.",
+		Blocks.RAIL: "A track. A cart rolls along one much faster than over plain ground.",
+		Blocks.ITEM_MINECART: "Place it on the ground, then right-click to ride. Rails "
+			+ "carry it faster.",
+		Blocks.ITEM_BOAT: "Place it on water, then right-click to ride.",
+		Blocks.NETHERRACK: "Soft, blood-red rock. The bulk of the nether's ground.",
+		Blocks.SOUL_SAND: "A slow, sucking patch of nether ground. You wade through it.",
+		Blocks.NETHER_BRICK_BLOCK: "Dark, tightly laid nether bricks.",
+		Blocks.MAGMA: "Cooling lava. It burns whatever stands on it bright enough to.",
+		Blocks.NETHER_QUARTZ_ORE: "Red rock shot through with white quartz veins.",
+		Blocks.NETHER_PORTAL: "A lit doorway between the overworld and the nether.",
+		Blocks.ITEM_NETHER_QUARTZ: "The quartz ore's drop. A pale crafting crystal.",
+		Blocks.ITEM_NETHER_BRICK: "Smelted from netherrack. Four press into a brick block.",
 	}
 
 
@@ -401,6 +424,15 @@ func _item_icon(id: int, size: int) -> Image:
 	if id == Blocks.ITEM_FISHING_ROD:
 		_fishing_rod_icon(img, k)
 		return img
+	if id == Blocks.ITEM_BOW:
+		_bow_icon(img, k)
+		return img
+	if id == Blocks.ITEM_MINECART:
+		_vehicle_icon(img, k, Color(0.62, 0.62, 0.66), Color(0.44, 0.44, 0.48))
+		return img
+	if id == Blocks.ITEM_BOAT:
+		_vehicle_icon(img, k, Color(0.58, 0.38, 0.19), Color(0.40, 0.25, 0.12))
+		return img
 	# every potion shares one flask; only the liquid, and whether it splashes, differ
 	if id >= Blocks.ITEM_POTION_SWIFTNESS and id <= Blocks.ITEM_POTION_SPLASH_NIGHT:
 		_potion_icon(img, k, _potion_color(id), id >= Blocks.ITEM_POTION_SPLASH_SWIFTNESS)
@@ -551,6 +583,23 @@ func _item_icon(id: int, size: int) -> Image:
 			_fish_icon(img, k, Color(0.70, 0.78, 0.86))
 		Blocks.ITEM_FISH_COOKED:
 			_fish_icon(img, k, Color(0.74, 0.52, 0.26))
+		Blocks.ITEM_NETHER_QUARTZ:
+			# a pale, faceted crystal shard
+			for i in 9:
+				_px(img, 4 + i, 12 - i, k, Color(0.92, 0.90, 0.94))
+				_px(img, 5 + i, 12 - i, k, Color(0.80, 0.78, 0.86))
+			_blob_px(img, 5, 5, 2, k, Color(0.96, 0.95, 0.99))
+			_px(img, 7, 7, k, Color(1, 1, 1, 0.7))
+		Blocks.ITEM_NETHER_BRICK:
+			# a single dark brick, laid flat
+			for y in range(6, 11):
+				for x in range(3, 13):
+					_px(img, x, y, k, Color(0.30, 0.18, 0.19) if ((x + y) & 1) == 0
+						else Color(0.26, 0.15, 0.16))
+			for x in range(4, 12):
+				_px(img, x, 12, k, Color(0.20, 0.12, 0.13))
+			for x in range(3, 13):
+				_px(img, x, 5, k, Color(0.38, 0.24, 0.25))
 		_:
 			_blob_px(img, 8, 8, 4, k, Color(0.6, 0.6, 0.65))
 	return img
@@ -612,6 +661,39 @@ func _fishing_rod_icon(img: Image, k: float) -> void:
 		_px(img, 14, y, k, Color(0.86, 0.86, 0.88))
 	_px(img, 13, 12, k, Color(0.70, 0.70, 0.74))
 	_px(img, 13, 13, k, Color(0.55, 0.55, 0.60))
+
+
+## A cart or a boat: an open U seen from the side, with a rim along the top. Both are the
+## same shape in different materials, which is exactly what the two models in the world are.
+func _vehicle_icon(img: Image, k: float, body: Color, edge: Color) -> void:
+	# the hull: a shallow V, wider at the top than at the keel
+	for y in range(6, 13):
+		var inset := 3 - int((y - 6) * 0.5)
+		for x in range(2 + inset, 14 - inset):
+			_px(img, x, y, k, body)
+	for x in range(3, 13):
+		_px(img, x, 5, k, edge)
+	# the rim, and a dark line where the inside meets the near wall
+	for x in range(2, 14):
+		_px(img, x, 4, k, edge)
+	for x in range(5, 11):
+		_px(img, x, 7, k, edge.darkened(0.25))
+
+
+## A bow: a limb curving out to the right with the string drawn straight between its tips.
+## The icon cannot show a draw, so the resting shape has to carry the meaning on its own.
+func _bow_icon(img: Image, k: float) -> void:
+	for i in 13:
+		var y := 2 + i
+		var dx := int(round(sin(float(i) / 12.0 * PI) * 5.0))
+		_px(img, 4 + dx, y, k, Color(0.50, 0.33, 0.16))
+		_px(img, 5 + dx, y, k, Color(0.62, 0.43, 0.22))
+	# the grip, where the limb is thickest
+	_px(img, 8, 8, k, Color(0.34, 0.21, 0.10))
+	_px(img, 9, 8, k, Color(0.34, 0.21, 0.10))
+	# the string, tip to tip
+	for y in range(2, 15):
+		_px(img, 4, y, k, Color(0.86, 0.86, 0.88))
 
 
 ## A fish: a rounded body with a tail fin and one dark eye.

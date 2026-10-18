@@ -43,6 +43,9 @@ const PLATE_LEASE := 0.2
 const MAX_PASSES := 8
 ## How far a network may spread from where it was touched.
 const MAX_RADIUS := 48
+## How long an observer's pulse lasts once the block it watches changes. One solver tick,
+## which is what Minecraft gives it: long enough for a relay or a lamp to catch it.
+const OBSERVER_PULSE := 0.1
 
 var world
 
@@ -56,16 +59,44 @@ var nodes: Dictionary = {}
 
 var _dirty: Dictionary = {}
 var _pending := false
+## Which dimension this solver is wired into. A wire in the nether must not reach a lamp at
+## the same coordinate in the overworld, so the persistent state travels with the
+## dimension: `set_dimension` swaps `nodes`/`state` for the other dimension's, kept in
+## `_store`. `power` is recomputed on every solve and is thrown away rather than stored.
+var dim := 0
+var _store: Dictionary = {}
 
 
 func setup(w) -> void:
 	world = w
+	# An observer is edge-triggered: it does not read a level, it watches for a change in
+	# the cell it faces. That is why it needs the world's edit signal rather than a level
+	# of its own -- and why it is the one component the solver cannot compute on demand.
+	if world != null and world.has_signal("block_changed"):
+		var cb := Callable(self, "_on_block_changed")
+		if not world.block_changed.is_connected(cb):
+			world.block_changed.connect(cb)
+
+
+## Something in the world changed. Every observer watching that cell pulses for a tick.
+func _on_block_changed(pos: Vector3i, _id: int) -> void:
+	for d in _NEIGHBOURS6:
+		var q: Vector3i = pos - d
+		if int(nodes.get(q, 0)) != Blocks.OBSERVER:
+			continue
+		var st: Dictionary = state.get(q, default_state(Blocks.OBSERVER, d))
+		if st.get("facing", Vector3i(0, 0, 1)) != d:
+			continue
+		st["pulse"] = OBSERVER_PULSE
+		state[q] = st
+		mark(q)
 
 
 # ================================================================ classification
 func is_source(id: int) -> bool:
 	return id == Blocks.SWITCH or id == Blocks.BUTTON or id == Blocks.PRESSURE_PLATE \
-		or id == Blocks.BATTERY or id == Blocks.INVERTER
+		or id == Blocks.BATTERY or id == Blocks.INVERTER \
+		or id == Blocks.OBSERVER or id == Blocks.COMPARATOR
 
 
 func is_consumer(id: int) -> bool:
@@ -87,9 +118,11 @@ func conducts(id: int) -> bool:
 		and not is_circuit(id)
 
 
-## Components that need to remember which way they point.
+## Components that need to remember which way they point. For an observer that is the cell
+## it watches; for a comparator it is the side it reads and the side it drives.
 func is_directional(id: int) -> bool:
-	return id == Blocks.PISTON or id == Blocks.RELAY
+	return id == Blocks.PISTON or id == Blocks.RELAY \
+		or id == Blocks.OBSERVER or id == Blocks.COMPARATOR
 
 
 # ================================================================ state
@@ -100,7 +133,8 @@ func default_state(id: int, facing: Vector3i = Vector3i(0, 0, 1)) -> Dictionary:
 		"delay": 0.0,         # relay: seconds left before it re-drives
 		"target": 0,          # relay: the level it is counting toward
 		"extended": false,    # piston
-		"facing": facing,     # piston / relay
+		"facing": facing,     # piston / relay / observer / comparator
+		"pulse": 0.0,         # observer: seconds left of its one-tick pulse
 		"lit": id == Blocks.INVERTER,   # an inverter starts lit, with no input
 	}
 
@@ -125,6 +159,30 @@ func unregister(pos: Vector3i) -> void:
 	state.erase(pos)
 	power.erase(pos)
 	mark(pos)
+
+
+## Swaps in another dimension's circuit state. Everything that was live in the dimension
+## being left is stored whole; the incoming dimension's nodes are all marked for a solve,
+## so its lamps and relays settle to their true state on the next tick instead of showing
+## whatever the other dimension left in `power`.
+func set_dimension(d: int) -> void:
+	if d == dim:
+		return
+	_store[dim] = {"nodes": nodes, "state": state}
+	dim = d
+	var s = _store.get(d)
+	if s == null:
+		nodes = {}
+		state = {}
+	else:
+		nodes = s["nodes"]
+		state = s["state"]
+	power = {}
+	_dirty = {}
+	_pending = false
+	for p in nodes.keys():
+		_dirty[p] = true
+		_pending = true
 
 
 ## Queues a re-solve around a position. Never solves inline: a solve can place
@@ -248,6 +306,19 @@ func _propagate(net: Dictionary) -> void:
 			# a cell, not a switch: it is always live
 			power[p] = MAX_LEVEL
 			frontier.append(p)
+		elif id == Blocks.OBSERVER:
+			# an observer only drives while its pulse is running, which is one tick for
+			# each change in front of it
+			if float(state.get(p, {}).get("pulse", 0.0)) > 0.0:
+				power[p] = MAX_LEVEL
+				frontier.append(p)
+		elif id == Blocks.COMPARATOR:
+			# a comparator reads the container it is pointed away from and drives a level
+			# in proportion to how full it is
+			var read := _container_level(p - _facing_of(p))
+			if read > 0:
+				power[p] = read
+				frontier.append(p)
 		elif is_source(id):
 			var st: Dictionary = state.get(p, {})
 			if bool(st.get("on", false)):
@@ -349,6 +420,42 @@ func _conductor_level(pos: Vector3i) -> int:
 	return int(power.get(pos, 0))
 
 
+## Which way a directional component points.
+func _facing_of(pos: Vector3i) -> Vector3i:
+	return state.get(pos, {}).get("facing", Vector3i(0, 0, 1))
+
+
+## How full the container at `pos` is, as a signal level 0..15. Minecraft counts filled
+## slots rather than items, so one full stack and one item in a chest of two slots both
+## read high: what a comparator reports is how full the container is, not how much is in it.
+func _container_level(pos: Vector3i) -> int:
+	var store = world.containers
+	if store == null:
+		return 0
+	var id: int = world.get_block(pos.x, pos.y, pos.z)
+	var cells: Array = []
+	if id == Blocks.CHEST:
+		if not store.has_chest(pos):
+			return 0
+		cells = store.chest_at(pos)
+	elif id == Blocks.FURNACE or id == Blocks.FURNACE_LIT:
+		if not store.has_furnace(pos):
+			return 0
+		var f: Dictionary = store.furnace_at(pos)
+		cells = [f["input"], f["fuel"], f["output"]]
+	else:
+		return 0
+	if cells.is_empty():
+		return 0
+	var used := 0
+	for c in cells:
+		if int(c["id"]) > 0 and int(c["count"]) > 0:
+			used += 1
+	if used == 0:
+		return 0
+	return 1 + int(float(used) / float(cells.size()) * float(MAX_LEVEL - 1))
+
+
 ## The signal arriving at a component from outside itself.
 func _input_level(pos: Vector3i, net: Dictionary, also: Vector3i) -> int:
 	var best := int(power.get(also, 0))
@@ -428,6 +535,12 @@ func _apply_components(net: Dictionary) -> void:
 			Blocks.WIRE:
 				_tile_swap(p, Blocks.WIRE,
 					Blocks.T_WIRE_ON if int(power.get(p, 0)) > 0 else Blocks.T_WIRE_OFF)
+			Blocks.OBSERVER:
+				_tile_swap(p, Blocks.OBSERVER,
+					Blocks.T_OBSERVER_ON if int(power.get(p, 0)) > 0 else Blocks.T_OBSERVER_OFF)
+			Blocks.COMPARATOR:
+				_tile_swap(p, Blocks.COMPARATOR,
+					Blocks.T_COMPARATOR_ON if int(power.get(p, 0)) > 0 else Blocks.T_COMPARATOR_OFF)
 
 
 ## Swaps a block's rendered tile without touching the world data. Circuit blocks
@@ -516,6 +629,10 @@ func _tick_timers(delta: float) -> void:
 			if float(st["timer"]) <= 0.0:
 				st["on"] = false
 				mark(p)
+		elif id == Blocks.OBSERVER and float(st.get("pulse", 0.0)) > 0.0:
+			# the pulse runs out on its own, which is what makes an observer a one-shot
+			st["pulse"] = maxf(0.0, float(st["pulse"]) - delta)
+			mark(p)
 
 
 ## A plate is a sensor: it reports whatever is standing on it.
@@ -563,6 +680,14 @@ func interact(pos: Vector3i, id: int) -> bool:
 			state[pos] = st3
 			mark(pos)
 			return true
+		Blocks.OBSERVER, Blocks.COMPARATOR:
+			# and the two that need aiming are aimed the same way: an observer round to
+			# watch a different cell, a comparator round to read a different container
+			var st4: Dictionary = state.get(pos, {})
+			st4["facing"] = _next_facing(st4.get("facing", Vector3i(0, 0, 1)))
+			state[pos] = st4
+			mark(pos)
+			return true
 	return false
 
 
@@ -583,10 +708,17 @@ func facing_from_look(look: Vector3) -> Vector3i:
 
 # ================================================================ persistence
 func serialize() -> PackedByteArray:
+	return serialize_dim(dim)
+
+
+func serialize_dim(d: int) -> PackedByteArray:
+	var v := _view(d)
+	var nd: Dictionary = v["nodes"]
+	var st_all: Dictionary = v["state"]
 	var buf := PackedByteArray()
 	var entries: Array = []
-	for p in state.keys():
-		var id: int = int(nodes.get(p, 0))
+	for p in st_all.keys():
+		var id: int = int(nd.get(p, 0))
 		if id == 0:
 			continue
 		entries.append([p, id])
@@ -595,7 +727,7 @@ func serialize() -> PackedByteArray:
 	var i := 0
 	for e in entries:
 		var p: Vector3i = e[0]
-		var st: Dictionary = state[p]
+		var st: Dictionary = st_all[p]
 		var f: Vector3i = st.get("facing", Vector3i(0, 0, 1))
 		var off := 4 + i * 22
 		buf.encode_s32(off, p.x)
@@ -614,9 +746,26 @@ func serialize() -> PackedByteArray:
 	return buf
 
 
+## A dimension's circuit state as the dictionaries the live names point at, or its record.
+func _view(d: int) -> Dictionary:
+	if d == dim:
+		return {"nodes": nodes, "state": state}
+	if not _store.has(d):
+		_store[d] = {"nodes": {}, "state": {}}
+	var s: Dictionary = _store.get(d, {})
+	return s
+
+
 func load_state(buf: PackedByteArray) -> void:
+	load_state_dim(dim, buf)
+
+
+func load_state_dim(d: int, buf: PackedByteArray) -> void:
 	if buf.size() < 4:
 		return
+	var v := _view(d)
+	var nd: Dictionary = v["nodes"]
+	var st_all: Dictionary = v["state"]
 	var n := buf.decode_s32(0)
 	for i in n:
 		var off := 4 + i * 22
@@ -624,8 +773,8 @@ func load_state(buf: PackedByteArray) -> void:
 			break
 		var p := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
 		var id := buf.decode_u8(off + 12)
-		nodes[p] = id
-		state[p] = {
+		nd[p] = id
+		st_all[p] = {
 			"on": buf.decode_u8(off + 13) == 1,
 			"extended": buf.decode_u8(off + 14) == 1,
 			"out": buf.decode_u8(off + 15),
@@ -646,6 +795,8 @@ func clear() -> void:
 	nodes.clear()
 	_dirty.clear()
 	_pending = false
+	_store.clear()
+	dim = 0
 
 
 const _NEIGHBOURS6 := [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),

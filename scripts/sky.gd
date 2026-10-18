@@ -16,6 +16,9 @@ var moon: DirectionalLight3D
 var time_of_day := 0.30        # 0 = midnight, 0.25 = sunrise, 0.5 = noon
 var running := true
 var underwater := false
+## Which dimension the sky is drawn for. The nether has no day, no sun and no moon: a
+## constant red haze, a dim light and a short fog are all there is to see.
+var dim := 0
 var _underwater_blend := 0.0
 var _fog_begin := 34.0
 var _fog_end := 100.0
@@ -240,11 +243,39 @@ func apply_render_preset(preset: int) -> void:
 func advance(delta: float) -> void:
 	if running:
 		time_of_day = fmod(time_of_day + delta / DAY_LENGTH, 1.0)
-		_advance_weather(delta)
+		# it never rains in the nether: the weather clock is not even run there, and any
+		# rain that was falling when the portal was stepped through is drained back to clear
+		if dim == 1:
+			rain_level = lerpf(rain_level, 0.0, clampf(delta * 2.0, 0.0, 1.0))
+		else:
+			_advance_weather(delta)
 	update_sky(delta)
 
 
+## Switches the sky to a dimension's look. Called by main alongside `world.set_dimension`.
+func set_dimension(d: int) -> void:
+	if d == dim:
+		return
+	dim = d
+	weather = Weather.CLEAR
+	rain_level = 0.0
+	_flash = 0.0
+	# The nether cannot take its ambient from the sky: a red sky's own light leaves every
+	# surface a near-black red, with no separation between the rock and the haze. It gets a
+	# flat warm light of its own instead, which is what makes the cavern readable.
+	if env != null:
+		if d == 1:
+			env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		else:
+			env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+			env.ambient_light_sky_contribution = 1.0
+	update_sky(0.0)
+
+
 func update_sky(delta: float) -> void:
+	if dim == 1:
+		_update_nether_sky()
+		return
 	var a := (time_of_day - 0.25) * TAU
 	var elev := sin(a)
 	var day := smoothstep(0.02, 0.32, elev)
@@ -304,6 +335,31 @@ func update_sky(delta: float) -> void:
 	env.ambient_light_energy = target_amb
 
 
+## The nether's look: a red-brown haze close in on every side, no sun and no moon, and a
+## steady dim ambient so the glowstone and the lava are what the eye goes to. It is the
+## *haze* that makes it read as a place rather than as a cave -- the far wall of a cavern
+## fades into the red instead of standing out as a clean, distant edge.
+func _update_nether_sky() -> void:
+	var top := Color(0.30, 0.08, 0.06)
+	var horizon := Color(0.46, 0.15, 0.10)
+	var ground := Color(0.26, 0.07, 0.06)
+	sky_mat.sky_top_color = top
+	sky_mat.sky_horizon_color = horizon
+	sky_mat.ground_bottom_color = ground
+	sky_mat.ground_horizon_color = horizon.lerp(ground, 0.5)
+	sun.light_energy = 0.0
+	moon.light_energy = 0.0
+	# a flat warm light rather than the sky's own: dim enough to leave the lava and the
+	# glowstone as the brightest things in the room, bright enough to walk by
+	env.ambient_light_color = Color(0.66, 0.40, 0.32)
+	env.ambient_light_energy = 0.82
+	env.adjustment_saturation = _base_saturation
+	env.fog_light_color = Color(0.36, 0.12, 0.08) if _underwater_blend < 0.001 \
+		else Color(0.10, 0.03, 0.04).lerp(Color(0.08, 0.22, 0.42), _underwater_blend)
+	env.fog_depth_begin = 0.0
+	env.fog_depth_end = lerpf(minf(_fog_end, 64.0), 16.0, _underwater_blend)
+
+
 func set_underwater(active: bool, delta: float) -> void:
 	var target := 1.0 if active else 0.0
 	var prev := _underwater_blend
@@ -316,6 +372,10 @@ func set_underwater(active: bool, delta: float) -> void:
 
 
 func is_night() -> bool:
+	# there is no day in the nether, so it counts as night for anything that asks: the
+	# hostile spawner in particular, which would otherwise never spawn anything there
+	if dim == 1:
+		return true
 	var a := (time_of_day - 0.25) * TAU
 	return sin(a) < -0.05
 

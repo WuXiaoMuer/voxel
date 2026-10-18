@@ -11,6 +11,7 @@ var player
 var sky: Node3D
 var mobs: Node3D
 var item_entities: Node3D
+var vehicles: Node3D
 var particles: Node3D
 var projectiles: Node3D
 var containers: Node
@@ -55,6 +56,17 @@ var _crack_stage := -1
 ## Lit TNT fuses, as {pos, t}: a fuse is the only block that destroys itself on a timer.
 var _fuses: Array = []
 var _night_vision := false
+## How long the player has been standing in a portal, and the moment after arriving when
+## travel is suppressed so stepping out of the arrival portal does not immediately send
+## them back. `_travelling` is raised for the frames the switch itself takes, so a second
+## portal check cannot start a second trip while the first is still streaming its chunks.
+var _portal_timer := 0.0
+var _travel_cooldown := 0.0
+var _travelling := false
+## How long you must stand in the doorway before it takes you. Minecraft's is four seconds
+## in the overworld and none at all in the nether; this splits the difference, and lets the
+## player see the screen darken for a moment before the world changes.
+const PORTAL_TIME := 1.5
 ## Where the player respawns after dying. Set to the world spawn on load, and moved to a
 ## bed the player sleeps in.
 var spawn_point := Vector3.ZERO
@@ -126,6 +138,7 @@ func _ready() -> void:
 	player.mob_dropped.connect(_on_mob_dropped)
 	player.tnt_lit.connect(_on_tnt_lit)
 	player.dispenser_fired.connect(_on_dispenser_fired)
+	player.bow_shot.connect(_on_bow_shot)
 	item_entities.setup(world, player)
 
 	# Combat wiring: skeletons fire at the player, mobs can hurt the player, and the
@@ -159,6 +172,20 @@ func _ready() -> void:
 	world.sign_opened.connect(_on_sign_opened)
 	world.bed_used.connect(_on_bed_used)
 	world.enchant_opened.connect(_on_enchant_opened)
+	world.anvil_used.connect(_on_anvil_used)
+	world.brew_used.connect(_on_brew_used)
+	player.vehicle_entered.connect(_on_vehicle_entered)
+
+	# Carts and boats: a layer of their own, between the items and the mobs.
+	vehicles = load("res://scripts/vehicles.gd").new()
+	vehicles.name = "Vehicles"
+	add_child(vehicles)
+	vehicles.setup(world)
+	vehicles.player = player
+	player.set_vehicles(vehicles)
+	# main keeps its own beacon list, so it wants the same edit signal the containers and
+	# the solver listen to
+	world.block_changed.connect(_on_block_changed)
 
 	hud = load("res://scripts/hud.gd").new()
 	hud.name = "HUD"
@@ -403,6 +430,13 @@ func _on_mob_died(kind: String, pos: Vector3) -> void:
 			item_entities.drop(Blocks.ITEM_SLIME_BALL, 1 + randi() % 3, pos + Vector3(0, 0.3, 0))
 		"enderman":
 			item_entities.drop(Blocks.ITEM_ENDER_PEARL, 1, pos + Vector3(0, 0.3, 0))
+		"iron_golem":
+			# a golem is built out of iron, so that is what is left of one
+			item_entities.drop(Blocks.ITEM_IRON, 3 + randi() % 3, pos + Vector3(0, 0.3, 0))
+		"wandering_trader":
+			# the trader deals in emeralds, so a killed one is worth one -- the only other
+			# way to get an emerald at all is to trade for it
+			item_entities.drop(Blocks.ITEM_EMERALD, 1, pos + Vector3(0, 0.3, 0))
 
 
 ## Experience a species is worth when killed.
@@ -412,7 +446,70 @@ func _mob_xp(kind: String) -> int:
 			return 5
 		"spider", "slime":
 			return 2
+		"iron_golem":
+			return 0
 	return 1 + randi() % 3
+
+
+## The player got into a cart or a boat.
+func _on_vehicle_entered(_kind: String) -> void:
+	hud.toast(I18n.t("Shift gets you out."))
+	Advancements.trigger("ride")
+
+
+## Beacons are powered by what they stand on: a 3x3 of mineral blocks under one is what
+## turns it on, and while it is on it feeds Regeneration to whoever is close enough. A
+## beacon with nothing under it is just a lamp.
+const BEACON_RANGE := 16.0
+var _beacons: Dictionary = {}
+var _beacon_scan := true
+var _beacon_t := 0.0
+
+
+## A beacon placed or broken joins or leaves the tick list, the same way a hopper does.
+## Save loading writes bytes directly and raises no signal, so the list is also rebuilt
+## from the edit list the first time it is needed after a world loads.
+func _on_block_changed(pos: Vector3i, id: int) -> void:
+	if id == Blocks.BEACON:
+		_beacons[pos] = true
+	elif _beacons.has(pos):
+		_beacons.erase(pos)
+
+
+func _tick_beacons(delta: float) -> void:
+	_beacon_t -= delta
+	if _beacon_t > 0.0:
+		return
+	_beacon_t = 1.0
+	if _beacon_scan:
+		_beacon_scan = false
+		_beacons.clear()
+		for k in world.edits.keys():
+			var p: Vector3i = k
+			if world.get_block(p.x, p.y, p.z) == Blocks.BEACON:
+				_beacons[p] = true
+	for k2 in _beacons.keys():
+		var p2: Vector3i = k2
+		if world.get_block(p2.x, p2.y, p2.z) != Blocks.BEACON:
+			_beacons.erase(p2)
+			continue
+		if not _beacon_powered(p2):
+			continue
+		var at := Vector3(p2) + Vector3(0.5, 0.5, 0.5)
+		if player.global_position.distance_to(at) <= BEACON_RANGE:
+			player.add_effect("regen", 6.0)
+
+
+## What a beacon stands on: a full 3x3 of iron, gold or diamond blocks, the way Minecraft's
+## pyramid's bottom layer works.
+func _beacon_powered(pos: Vector3i) -> bool:
+	for dz in [-1, 0, 1]:
+		for dx in [-1, 0, 1]:
+			var id: int = world.get_block(pos.x + dx, pos.y - 1, pos.z + dz)
+			if id != Blocks.IRON_BLOCK and id != Blocks.GOLD_BLOCK \
+					and id != Blocks.DIAMOND_BLOCK:
+				return false
+	return true
 
 
 ## A creeper went off: blast a sphere of blocks away through the edit seam (which also
@@ -496,6 +593,14 @@ func _on_dispenser_fired(pos: Vector3i, dir: Vector3) -> void:
 	projectiles.spawn(_block_center(pos) + d * 0.7, d, 26.0, 4.0, false)
 
 
+## A drawn bow was let go: the arrow flies from the eye along the look, marked as the
+## player's so it can hit mobs rather than pass through them.
+func _on_bow_shot(origin: Vector3, dir: Vector3, speed: float, dmg: float) -> void:
+	if projectiles == null:
+		return
+	projectiles.spawn(origin, dir.normalized(), speed, dmg, true)
+
+
 # ================================================================ modes
 func _enter_title() -> void:
 	# leaving a session always drops the socket: a stale host peer would keep the port
@@ -523,10 +628,14 @@ func _on_new_world(nm: String, s: int, creative: bool, distance: int, cheats: bo
 	item_entities.reset()
 	if projectiles != null:
 		projectiles.clear()
+	if vehicles != null:
+		vehicles.reset()
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
 	_fuses = []
+	_beacons.clear()
+	_beacon_scan = true
 	Advancements.reset()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
@@ -540,6 +649,10 @@ func _on_new_world(nm: String, s: int, creative: bool, distance: int, cheats: bo
 	sky.time_of_day = 0.42
 	spawn_point = Vector3.ZERO
 	sky.set_weather(sky.Weather.CLEAR, true)
+	sky.set_dimension(0)
+	_travel_cooldown = 0.0
+	_portal_timer = 0.0
+	_travelling = false
 	player.place_at(world.terrain.find_spawn() + Vector3(0, 0.2, 0))
 	_needs_spawn_fix = true
 	if creative:
@@ -604,10 +717,14 @@ func _seed_network_world(s: int, creative: bool, distance: int, cheats: bool,
 	item_entities.reset()
 	if projectiles != null:
 		projectiles.clear()
+	if vehicles != null:
+		vehicles.reset()
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
 	_fuses = []
+	_beacons.clear()
+	_beacon_scan = true
 	Advancements.reset()
 	world.setup(s, distance)
 	world.render_distance = clampi(distance, Settings.MIN_RD, Settings.max_render_distance())
@@ -620,6 +737,7 @@ func _seed_network_world(s: int, creative: bool, distance: int, cheats: bool,
 	sky.time_of_day = 0.42
 	spawn_point = Vector3.ZERO
 	sky.set_weather(sky.Weather.CLEAR, true)
+	sky.set_dimension(0)
 	# the host's changes, replayed as chunks stream in (the same path the save loader uses),
 	# then the client authority so my own edits predict locally and ask the host
 	world.load_edits(edits)
@@ -642,6 +760,8 @@ func _on_load_world(dir_name: String) -> void:
 	item_entities.reset()
 	if projectiles != null:
 		projectiles.clear()
+	if vehicles != null:
+		vehicles.reset()
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
@@ -663,40 +783,23 @@ func _on_load_world(dir_name: String) -> void:
 	var sp = meta.get("spawn", null)
 	if sp is Array and sp.size() == 3:
 		spawn_point = Vector3(float(sp[0]), float(sp[1]), float(sp[2]))
-	var ed := FileAccess.open("%s/edits.bin" % base, FileAccess.READ)
-	if ed != null:
-		world.load_edits(ed.get_buffer(ed.get_length()))
-		ed.close()
-	# the panels' facings, read right after the blocks they belong to
-	var fdf := FileAccess.open("%s/facing.bin" % base, FileAccess.READ)
-	if fdf != null:
-		world.load_facing(fdf.get_buffer(fdf.get_length()))
-		fdf.close()
-	# flowing-fluid levels, likewise not derivable from the block ids
-	var wdf := FileAccess.open("%s/fluid.bin" % base, FileAccess.READ)
-	if wdf != null:
-		world.load_fluid(wdf.get_buffer(wdf.get_length()))
-		wdf.close()
-	# sign text, also not derivable from the block ids
-	var sg := FileAccess.open("%s/sign.bin" % base, FileAccess.READ)
-	if sg != null:
-		world.load_signs(sg.get_buffer(sg.get_length()))
-		sg.close()
-	# the circuit file has to be read *after* the edits, or the circuit blocks it
-	# refers to are not in the world yet and every one of them is dropped
-	if world.circuit != null:
-		world.circuit.clear()
-		var cf := FileAccess.open("%s/circuit.bin" % base, FileAccess.READ)
-		if cf != null:
-			world.circuit.load_state(cf.get_buffer(cf.get_length()))
-			cf.close()
-	# chest and furnace contents, read after the blocks exist so a record whose chest has
-	# since been broken can be dropped
-	var cbf := FileAccess.open("%s/containers.bin" % base, FileAccess.READ)
-	if cbf != null:
-		containers.load_state(cbf.get_buffer(cbf.get_length()))
-		cbf.close()
+	# both dimensions' files are read, overworld first. Reading the nether's *after* the
+	# overworld's is what lets the loader order the two the way `set_dimension` expects:
+	# the dimension being adopted has to be the one whose edits are already in place.
+	_load_dim_files(base, 0, "")
+	_load_dim_files(base, 1, "_nether")
 	containers.prune()
+	# the player saved on whichever side of the doorway they were standing; adopt that
+	# dimension before loading starts, so the chunks stream in around the right place
+	if int(meta.get("dimension", 0)) == 1:
+		world.set_dimension(1)
+		containers.set_dimension(1)
+		sky.set_dimension(1)
+	else:
+		sky.set_dimension(0)
+	_travel_cooldown = 0.0
+	_portal_timer = 0.0
+	_travelling = false
 	var ps = meta.get("player", {})
 	if ps is Dictionary:
 		player.reset_inventory()
@@ -706,6 +809,44 @@ func _on_load_world(dir_name: String) -> void:
 	var adv = meta.get("advancements", {})
 	Advancements.load_from(adv if adv is Dictionary else {})
 	_begin_loading()
+
+
+## Reads one dimension's block state back out of the files `_write_dim_files` wrote, in the
+## order the pieces depend on each other: the edits first, then the facings and fluid levels
+## that belong to them, then the circuit, whose blocks only exist once the edits are in.
+func _load_dim_files(base: String, d: int, suffix: String) -> void:
+	var ed := FileAccess.open("%s/edits%s.bin" % [base, suffix], FileAccess.READ)
+	if ed != null:
+		world.load_edits_dim(d, ed.get_buffer(ed.get_length()))
+		ed.close()
+	# the panels' facings, read right after the blocks they belong to
+	var fdf := FileAccess.open("%s/facing%s.bin" % [base, suffix], FileAccess.READ)
+	if fdf != null:
+		world.load_facing_dim(d, fdf.get_buffer(fdf.get_length()))
+		fdf.close()
+	# flowing-fluid levels, likewise not derivable from the block ids
+	var wdf := FileAccess.open("%s/fluid%s.bin" % [base, suffix], FileAccess.READ)
+	if wdf != null:
+		world.load_fluid_dim(d, wdf.get_buffer(wdf.get_length()))
+		wdf.close()
+	# sign text, also not derivable from the block ids
+	var sg := FileAccess.open("%s/sign%s.bin" % [base, suffix], FileAccess.READ)
+	if sg != null:
+		world.load_signs_dim(d, sg.get_buffer(sg.get_length()))
+		sg.close()
+	# the circuit file has to be read *after* the edits, or the circuit blocks it
+	# refers to are not in the world yet and every one of them is dropped
+	if world.circuit != null:
+		var cf := FileAccess.open("%s/circuit%s.bin" % [base, suffix], FileAccess.READ)
+		if cf != null:
+			world.circuit.load_state_dim(d, cf.get_buffer(cf.get_length()))
+			cf.close()
+	# chest and furnace contents, read after the blocks exist so a record whose chest has
+	# since been broken can be dropped
+	var cbf := FileAccess.open("%s/containers%s.bin" % [base, suffix], FileAccess.READ)
+	if cbf != null:
+		containers.load_state_dim(d, cbf.get_buffer(cbf.get_length()))
+		cbf.close()
 
 
 func _on_delete_world(dir_name: String) -> void:
@@ -785,6 +926,8 @@ func _quit_to_title() -> void:
 	item_entities.reset()
 	if projectiles != null:
 		projectiles.clear()
+	if vehicles != null:
+		vehicles.reset()
 	containers.reset()
 	particles.clear()
 	_clear_xp_orbs()
@@ -795,7 +938,14 @@ func _quit_to_title() -> void:
 func _respawn() -> void:
 	# a bed the player slept in wins over the world spawn
 	var at: Vector3 = spawn_point if spawn_point != Vector3.ZERO else world.terrain.find_spawn()
-	player.respawn(world.safe_spawn_near(at))
+	# dying in the nether sends you back to the overworld: the bed and the world spawn are
+	# overworld places, and there is nowhere in the nether a death is meant to return you to
+	if world.dimension == 1:
+		# no doorway to find or build: a death sends you back to your bed, not to a portal
+		await _enter_dimension(0, at, at)
+		player.respawn(world.safe_spawn_near(player.global_position))
+	else:
+		player.respawn(world.safe_spawn_near(at))
 	mode = Mode.PLAY
 	ui.close_all()
 	player.set_input_enabled(true)
@@ -814,6 +964,133 @@ func _on_died() -> void:
 	player.set_input_enabled(false)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	hud.flash_hurt()
+
+
+# ================================================================ nether travel
+## The doorway check, run once a frame while playing. Standing in a portal block for
+## PORTAL_TIME seconds takes the player through; the block under their feet is what is
+## tested, because a portal's doorway is three cells tall and the feet are what enter it.
+func _portal_check(delta: float) -> void:
+	if _travelling:
+		return
+	if _travel_cooldown > 0.0:
+		_travel_cooldown = maxf(0.0, _travel_cooldown - delta)
+		_portal_timer = 0.0
+		return
+	var p: Vector3 = player.global_position
+	var cell := Vector3i(floori(p.x), floori(p.y), floori(p.z))
+	if world.get_block(cell.x, cell.y, cell.z) != Blocks.NETHER_PORTAL:
+		_portal_timer = 0.0
+		return
+	_portal_timer += delta
+	if _portal_timer >= PORTAL_TIME:
+		_portal_timer = 0.0
+		_travel()
+
+
+## Through the doorway: the overworld's coordinates are divided by eight on the way to the
+## nether and multiplied by eight on the way back, the way Minecraft scales the two
+## dimensions so eight blocks of nether travel are one of overworld distance.
+func _travel() -> void:
+	var p: Vector3 = player.global_position
+	var to := 1 if world.dimension == 0 else 0
+	var scale := 0.125 if to == 1 else 8.0
+	var dest := Vector3(p.x * scale, p.y, p.z * scale)
+	hud.toast(I18n.t("The nether takes you." if to == 1 else "The overworld takes you back."))
+	Sfx.play("click", -3.0, 0.6)
+	_enter_dimension(to, dest)
+	Advancements.trigger("nether")
+
+
+## Switches dimension and puts the player down at the doorway nearest `dest`, building one
+## if the destination has none. Everything that belongs to the dimension being left -- the
+## mobs, the dropped items, the vehicles, the loose particles, the burning fuses -- is let go
+## of first, because none of it can follow a player through a doorway.
+func _enter_dimension(to: int, dest: Vector3, at_override = null) -> void:
+	_travelling = true
+	# the player must not fall or be pushed about while the destination streams in: the
+	# blocks under their feet in the *new* dimension are not loaded yet, so they are frozen
+	# where they stand until there is real ground to put them down on
+	player.set_physics_process(false)
+	player.set_input_enabled(false)
+	mode = Mode.LOADING
+	ui.open_screen("loading")
+	hud.visible = false
+	selection.visible = false
+	crack.visible = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	mobs.reset()
+	item_entities.reset()
+	if projectiles != null:
+		projectiles.clear()
+	if vehicles != null:
+		vehicles.reset()
+	particles.clear()
+	_fuses = []
+	world.set_dimension(to)
+	containers.set_dimension(to)
+	sky.set_dimension(to)
+	await _stream_at(dest)
+	var at: Vector3 = at_override if at_override != null else _portal_arrival(to, dest)
+	player.place_at(at)
+	player.velocity = Vector3.ZERO
+	player.set_physics_process(true)
+	player.set_input_enabled(true)
+	mode = Mode.PLAY
+	ui.close_all()
+	hud.visible = true
+	Input.mouse_mode = _play_mouse_mode()
+	_travel_cooldown = 2.0
+	_travelling = false
+
+
+## Streams the chunks around a point and waits for them to settle, so the arrival search can
+## read real blocks rather than the empty answers an unloaded column gives. The loading
+## screen shows how far it has got, the same way a world load does.
+func _stream_at(pos: Vector3) -> void:
+	var t := 0.0
+	while true:
+		world.update_streaming(pos)
+		var p: float = world.progress()
+		ui.set_loading(p * 100.0, "%s  -  %d%%" % [
+			"The nether" if world.dimension == 1 else "The overworld", int(p * 100.0)])
+		if p >= 0.999 and world.idle():
+			break
+		t += get_process_delta_time()
+		if t > 30.0:
+			break
+		await get_tree().process_frame
+	for i in 3:
+		await get_tree().process_frame
+
+
+## Where the player lands in the new dimension: the nearest existing doorway within reach,
+## or a freshly built one on the closest standable ground. The fallback -- nothing standable
+## for a long way out -- drops the player in at the scaled height and lets the rescue code
+## put them back on the ground.
+func _portal_arrival(to: int, dest: Vector3) -> Vector3:
+	var fx := floori(dest.x)
+	var fy := floori(dest.y)
+	var fz := floori(dest.z)
+	var near: Vector3i = world.find_portal_near(fx, fy, fz, 26)
+	if near.x < (1 << 20):
+		return Vector3(float(near.x) + 0.5, float(near.y) + 0.1, float(near.z) + 0.5)
+	for radius in range(0, 14):
+		var steps := maxi(1, radius * 6)
+		for a in range(0, steps):
+			var ang := TAU * float(a) / float(steps)
+			var x := fx + int(round(cos(ang) * float(radius)))
+			var z := fz + int(round(sin(ang) * float(radius)))
+			var g: int = world.portal_ground(x, z)
+			if g < 0:
+				continue
+			# the nether's floor is lava at the bottom of a cavern: never land in it
+			if to == 1 and g < VoxelTerrain.NETHER_LAVA + 2:
+				continue
+			world.build_portal_at(Vector3i(x, g, z))
+			return Vector3(float(x) + 0.5, float(g) + 0.05, float(z) + 0.5)
+	return Vector3(float(fx) + 0.5, float(clampi(fy, VoxelTerrain.MIN_Y + 4,
+		VoxelTerrain.MAX_Y - 4)), float(fz) + 0.5)
 
 
 func _apply_settings(from_menu: bool = true) -> void:
@@ -956,6 +1233,49 @@ func _close_enchant() -> void:
 		Input.mouse_mode = _play_mouse_mode()
 
 
+# ================================================================ anvil
+## Right-clicking an anvil repairs the tool in your hand for experience levels. There is no
+## panel: the anvil is a working block rather than a station with a screen, so the price is
+## shown as a toast and the deal happens on the click.
+func _on_anvil_used(_pos: Vector3i) -> void:
+	if mode != Mode.PLAY or _inv_open or _enchant_open:
+		return
+	var cost: int = player.repair_cost()
+	if cost < 0:
+		hud.toast(I18n.t("Hold a worn tool or piece of armour to repair it here."))
+		return
+	if player.level < cost:
+		hud.toast(I18n.tf("That repair needs %d levels.", [cost]))
+		Sfx.play("click", -12.0, 0.8)
+		return
+	if not player.repair_held():
+		return
+	hud.toast(I18n.tf("Repaired for %d levels.", [cost]))
+	Sfx.play("click", -5.0, 1.25)
+	Advancements.trigger("repair")
+
+
+# ================================================================ brewing
+## Right-clicking a brewing stand with a reagent brews the potion that reagent makes. The
+## grid recipes still work; the stand is the same trade without needing a table, which is
+## what a brewing stand is for.
+func _on_brew_used(_pos: Vector3i) -> void:
+	if mode != Mode.PLAY or _inv_open or _enchant_open:
+		return
+	if player.brew_result(player.selected_id()) <= 0:
+		hud.toast(I18n.t("Hold a feather, slimeball, bone or glowstone at the stand."))
+		return
+	if not player.creative and player.count_of(Blocks.GLASS) < 1:
+		hud.toast(I18n.t("Brewing needs a pane of glass."))
+		Sfx.play("click", -12.0, 0.8)
+		return
+	if not player.brew_selected():
+		return
+	hud.toast(I18n.t("Brewed!"))
+	Sfx.play("click", -5.0, 1.15)
+	Advancements.trigger("brew")
+
+
 # ================================================================ trading
 ## Right-clicking a villager opens its stall. The offers come from the villager's
 ## profession, which is a pure function of where it stands, so a village's shopkeepers
@@ -999,6 +1319,15 @@ func _villager_offers(prof: String) -> Array:
 			return [
 				{"give": Blocks.COBBLESTONE, "give_n": 20, "get": Blocks.ITEM_EMERALD, "get_n": 1},
 				{"give": Blocks.ITEM_EMERALD, "give_n": 1, "get": Blocks.STONE_BRICK, "get_n": 8},
+			]
+		"Trader":
+			# the trader carries the things a village does not: treasure and rarities, at a
+			# price, and it buys emeralds back for the goods it deals in
+			return [
+				{"give": Blocks.ITEM_EMERALD, "give_n": 4, "get": Blocks.ITEM_DIAMOND, "get_n": 1},
+				{"give": Blocks.ITEM_EMERALD, "give_n": 3, "get": Blocks.ITEM_SLIME_BALL, "get_n": 2},
+				{"give": Blocks.ITEM_EMERALD, "give_n": 2, "get": Blocks.ITEM_GUNPOWDER, "get_n": 4},
+				{"give": Blocks.ITEM_EMERALD, "give_n": 1, "get": Blocks.ITEM_FISH_COOKED, "get_n": 6},
 			]
 	return []
 
@@ -1291,6 +1620,9 @@ func _save_game() -> void:
 		"weather": int(sky.weather),
 		"weather_timer": sky.weather_timer,
 		"spawn": [spawn_point.x, spawn_point.y, spawn_point.z],
+		# which side of the doorway the player is standing on, so loading puts them back
+		# in the dimension they saved in rather than always surfacing in the overworld
+		"dimension": world.dimension,
 		"player": player.save_state(),
 		"advancements": Advancements.serialize(),
 		"saved_at": Time.get_datetime_string_from_system(),
@@ -1299,40 +1631,48 @@ func _save_game() -> void:
 	if f != null:
 		f.store_string(JSON.stringify(meta, "  "))
 		f.close()
-	var e := FileAccess.open("%s/edits.bin" % base, FileAccess.WRITE)
-	if e != null:
-		e.store_buffer(world.serialize_edits())
-		e.close()
-	# a thin panel's facing is not derivable from the block id, so it gets its own file
-	var ff := FileAccess.open("%s/facing.bin" % base, FileAccess.WRITE)
-	if ff != null:
-		ff.store_buffer(world.serialize_facing())
-		ff.close()
-	# so are the fluid levels: a flowing cell and a source are both plain water
-	var wf := FileAccess.open("%s/fluid.bin" % base, FileAccess.WRITE)
-	if wf != null:
-		wf.store_buffer(world.serialize_fluid())
-		wf.close()
-	# and so is the text on a sign
-	var sgf := FileAccess.open("%s/sign.bin" % base, FileAccess.WRITE)
-	if sgf != null:
-		sgf.store_buffer(world.serialize_signs())
-		sgf.close()
-	# circuit state is not derivable from the blocks alone -- a lever's position and
-	# a piston's arm are not in the voxel data -- so it gets its own file
-	if world.circuit != null:
-		var cf := FileAccess.open("%s/circuit.bin" % base, FileAccess.WRITE)
-		if cf != null:
-			cf.store_buffer(world.circuit.serialize())
-			cf.close()
-	# chest and furnace contents get their own file too; a world saved before this
-	# existed simply has no containers.bin, and loads with everything empty
-	var cbf := FileAccess.open("%s/containers.bin" % base, FileAccess.WRITE)
-	if cbf != null:
-		cbf.store_buffer(containers.serialize())
-		cbf.close()
+	# both dimensions are written, each under its own suffix: the overworld's files keep the
+	# names they always had, so an old save still loads, and the nether's are the same names
+	# with `_nether` appended.
+	_write_dim_files(base, 0, "")
+	_write_dim_files(base, 1, "_nether")
 	if mode == Mode.PAUSE or mode == Mode.PLAY:
 		hud.toast(I18n.tf("World saved  (%d blocks changed)", [world.edit_count()]))
+
+
+## One dimension's block state, as the little family of binary files the loader reads back.
+func _write_dim_files(base: String, d: int, suffix: String) -> void:
+	var e := FileAccess.open("%s/edits%s.bin" % [base, suffix], FileAccess.WRITE)
+	if e != null:
+		e.store_buffer(world.serialize_edits_dim(d))
+		e.close()
+	# a thin panel's facing is not derivable from the block id, so it gets its own file
+	var ff := FileAccess.open("%s/facing%s.bin" % [base, suffix], FileAccess.WRITE)
+	if ff != null:
+		ff.store_buffer(world.serialize_facing_dim(d))
+		ff.close()
+	# so are the fluid levels: a flowing cell and a source are both plain water
+	var wf := FileAccess.open("%s/fluid%s.bin" % [base, suffix], FileAccess.WRITE)
+	if wf != null:
+		wf.store_buffer(world.serialize_fluid_dim(d))
+		wf.close()
+	# and so is the text on a sign
+	var sgf := FileAccess.open("%s/sign%s.bin" % [base, suffix], FileAccess.WRITE)
+	if sgf != null:
+		sgf.store_buffer(world.serialize_signs_dim(d))
+		sgf.close()
+	# circuit state is not derivable from the blocks alone -- a lever's position and a
+	# piston's arm are not in the voxel data -- so it gets its own file
+	if world.circuit != null:
+		var cf := FileAccess.open("%s/circuit%s.bin" % [base, suffix], FileAccess.WRITE)
+		if cf != null:
+			cf.store_buffer(world.circuit.serialize_dim(d))
+			cf.close()
+	# and chest and furnace contents get their own file too
+	var cbf := FileAccess.open("%s/containers%s.bin" % [base, suffix], FileAccess.WRITE)
+	if cbf != null:
+		cbf.store_buffer(containers.serialize_dim(d))
+		cbf.close()
 
 
 func _read_json(path: String) -> Dictionary:
@@ -1551,12 +1891,15 @@ func _process(delta: float) -> void:
 		_update_weather(delta)
 		_update_xp_orbs(delta)
 		_tick_fuses(delta)
+		_tick_beacons(delta)
+		vehicles.update(player.global_position, delta)
 		mobs.update(player.global_position, delta, sky.is_night())
 		projectiles.update(player.global_position, delta)
 		item_entities.update(player.global_position, delta)
 		particles.update(delta)
 		_update_selection()
 		_update_crack()
+		_portal_check(delta)
 		# night vision: the environment brightens while the potion lasts
 		var want_nv: bool = player.has_effect("night")
 		if want_nv != _night_vision:
@@ -1680,6 +2023,15 @@ func _check(label: String, cond: bool, detail: String = "") -> void:
 	else:
 		_fail += 1
 		print("  FAIL  %s  %s" % [label, detail])
+
+
+## The hotbar slot holding `id`, or -1. The selftest gives itself an item and then has to
+## select it before driving the real right-click path; this keeps that loop in one place.
+func _slot_of(id: int) -> int:
+	for i in player.hotbar.size():
+		if int(player.hotbar[i]["id"]) == id:
+			return i
+	return -1
 
 
 func _run_selftest() -> void:
@@ -2543,6 +2895,478 @@ func _run_selftest() -> void:
 			and player.global_position.distance_to(pbefore) > 1.0,
 			"moved %.1f" % player.global_position.distance_to(pbefore))
 
+	# 14b. husbandry, crops, fishing, wolves, explosives and potions. All six arrived in the
+	# same pass and not one of them had a check of its own. They are driven through the same
+	# functions the player's right-click calls -- `_mob_action`, `_farm_action`, `_item_use` --
+	# so a break in the interaction layer shows up here rather than hiding behind a helper
+	# only the tests know about.
+	player.creative = false
+	var spen := Vector3(float(sbx) + 8.5, float(sby) + 1.0, float(sbz) + 0.5)
+
+	# breeding: two fed animals pair up, make a baby, and the baby grows up
+	var cow_a = mobs.spawn_at("cow", spen)
+	var cow_b = mobs.spawn_at("cow", spen + Vector3(1.0, 0.0, 0.0))
+	_check("a cow takes wheat but not a bone",
+		cow_a.feed(Blocks.ITEM_WHEAT) and not cow_b.feed(Blocks.ITEM_BONE))
+	_check("feeding sets an animal wanting to breed", cow_a.love_t > 0.0)
+	cow_b.feed(Blocks.ITEM_WHEAT)
+	var cows_before: int = mobs._count_of("cow")
+	mobs._tick_breeding(0.01)
+	var baby = null
+	for m in mobs.mobs:
+		if is_instance_valid(m) and str(m.kind) == "cow" and bool(m.baby):
+			baby = m
+	_check("a fed pair makes one baby",
+		baby != null and mobs._count_of("cow") == cows_before + 1,
+		"%d -> %d" % [cows_before, mobs._count_of("cow")])
+	_check("the parents go quiet for a while", cow_a.love_t == 0.0 and cow_a._breed_cd > 0.0)
+	if baby != null:
+		baby._tick_husbandry(61.0)
+		_check("a baby grows up after a minute", not baby.baby)
+
+	# shearing: the fleece comes off, grows back, and the real click drops the wool
+	var sheep = mobs.spawn_at("sheep", spen + Vector3(2.0, 0.0, 0.0))
+	var wool_n: int = sheep.shear()
+	_check("shearing yields one to three wool", wool_n >= 1 and wool_n <= 3, str(wool_n))
+	_check("a shorn sheep has nothing left to shear", sheep.shear() == -1)
+	sheep._tick_husbandry(46.0)
+	_check("the fleece grows back", not sheep.sheared)
+	player.give(Blocks.ITEM_SHEARS, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_SHEARS))
+	# shearing drops the wool as a loose entity for you to walk over, not into the bag
+	var wool_before: int = item_entities.items.size()
+	_check("right-clicking a sheep with shears shears it",
+		player._mob_action(sheep) and item_entities.items.size() > wool_before)
+
+	# crops: a carrot plants on farmland and ripens through its stages
+	var farm_x := sbx - 2
+	var farm_z := sbz + 7
+	world.set_block(farm_x, sby, farm_z, Blocks.AIR)
+	world.set_block(farm_x, sby, farm_z, Blocks.FARMLAND)
+	player.give(Blocks.ITEM_CARROT, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_CARROT))
+	var farm_hit := {"pos": Vector3i(farm_x, sby, farm_z),
+		"prev": Vector3i(farm_x, sby + 1, farm_z)}
+	_check("a carrot plants on farmland",
+		player._farm_action(farm_hit, Vector3i(farm_x, sby, farm_z), Blocks.FARMLAND)
+		and world.get_block(farm_x, sby + 1, farm_z) == Blocks.CARROT_0,
+		str(world.get_block(farm_x, sby + 1, farm_z)))
+	# the growth clock samples the edit list, so one crop is only reached after enough
+	# passes; 3000 samples is far past the point where it could be missed
+	var ripened := false
+	for gi in 3000:
+		_grow_crops(3.0)
+		if world.get_block(farm_x, sby + 1, farm_z) != Blocks.CARROT_0:
+			ripened = true
+			break
+	_check("a planted carrot ripens over time", ripened)
+	_check("a ripe carrot drops a carrot", Blocks.drops[Blocks.CARROT_3] == Blocks.ITEM_CARROT)
+
+	# fishing: a cast floats a bobber; a bite is a fish, an early reel is not
+	player.give(Blocks.ITEM_FISHING_ROD, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_FISHING_ROD))
+	var water_x := sbx + 4
+	var water_z := sbz + 9
+	world.set_block(water_x, sby, water_z, Blocks.AIR)
+	world.set_block(water_x, sby, water_z, Blocks.WATER)
+	_check("casting the rod puts a bobber in the water",
+		player._fishing_use({"pos": Vector3i(water_x, sby, water_z)}) and player._bobber != null)
+	_check("reeling before a bite brings back no fish",
+		player._reel() and player._bobber == null)
+	player._fishing_use({"pos": Vector3i(water_x, sby, water_z)})
+	var fish_before: int = item_entities.items.size()
+	player._tick_fishing(120.0)
+	_check("a fish takes the bait after a while", player._bitten)
+	player._reel()
+	_check("reeling a bite lands a raw fish", item_entities.items.size() > fish_before,
+		"%d -> %d" % [fish_before, item_entities.items.size()])
+	# take the test pool back out: a floating water cell would flow for the rest of the run
+	world.set_block(water_x, sby, water_z, Blocks.AIR)
+
+	# wolves: a bone can tame one, meat heals it, an empty hand sits it down
+	var wolf = mobs.spawn_at("wolf", spen + Vector3(3.0, 0.0, 0.0))
+	for wi in 60:
+		if wolf.tamed:
+			break
+		wolf.feed(Blocks.ITEM_BONE)
+	_check("a bone can tame a wolf", wolf.tamed)
+	_check("a tamed wolf no longer wants bones", not wolf.feed(Blocks.ITEM_BONE))
+	wolf.health = 3.0
+	_check("meat heals a tamed wolf", wolf.feed(Blocks.ITEM_BEEF_RAW) and wolf.health > 3.0)
+	player.hotbar[player.selected] = {"id": 0, "count": 0}
+	var sit_before: bool = wolf.sitting
+	_check("an empty hand sits a tamed wolf down",
+		player._mob_action(wolf) and wolf.sitting != sit_before)
+
+	# explosives: the recipe, the fuse, and the blast at the end of it
+	for si6 in 9:
+		player.crafting[si6] = {"id": 0, "count": 0}
+	player.table_available = true
+	player.crafting[0] = {"id": Blocks.ITEM_IRON, "count": 1}
+	player.crafting[1] = {"id": Blocks.ITEM_FLINT, "count": 1}
+	_check("flint and an iron ingot craft flint and steel",
+		int(player.craft_result()["id"]) == Blocks.ITEM_FLINT_STEEL)
+	for si7 in 9:
+		player.crafting[si7] = {"id": Blocks.COBBLESTONE, "count": 1}
+	player.crafting[4] = {"id": Blocks.ITEM_IRON, "count": 1}
+	_check("a cobblestone ring with an iron core crafts a dispenser",
+		int(player.craft_result()["id"]) == Blocks.DISPENSER)
+	player.table_available = false
+	for si8 in 9:
+		player.crafting[si8] = {"id": 0, "count": 0}
+	player.give(Blocks.ITEM_FLINT_STEEL, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_FLINT_STEEL))
+	var tnt_x := sbx + 12
+	var tnt_z := sbz - 8
+	world.set_block(tnt_x, sby, tnt_z, Blocks.AIR)
+	world.set_block(tnt_x, sby, tnt_z, Blocks.TNT)
+	_check("flint and steel lights a TNT block",
+		player._light_tnt({"pos": Vector3i(tnt_x, sby, tnt_z)}) and _fuses.size() > 0)
+	_tick_fuses(3.0)
+	_check("the fuse burns down and the TNT goes off",
+		world.get_block(tnt_x, sby, tnt_z) != Blocks.TNT and _fuses.is_empty())
+
+	# dispenser: an arrow in hand is launched along the aim
+	var disp_x := sbx + 12
+	var disp_z := sbz + 6
+	world.set_block(disp_x, sby, disp_z, Blocks.AIR)
+	world.set_block(disp_x, sby, disp_z, Blocks.DISPENSER)
+	player.give(Blocks.ITEM_ARROW, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_ARROW))
+	var arrows_before: int = projectiles.arrows.size()
+	_check("an arrow handed to a dispenser is launched",
+		player._dispenser_fire({"pos": Vector3i(disp_x, sby, disp_z)})
+		and projectiles.arrows.size() > arrows_before
+		and player.count_of(Blocks.ITEM_ARROW) == 0)
+
+	# bow: the draw is what sets the shot, so a flick of the button must not fire
+	for si10 in 9:
+		player.crafting[si10] = {"id": 0, "count": 0}
+	player.table_available = true
+	player.crafting[1] = {"id": Blocks.ITEM_STICK, "count": 1}
+	player.crafting[2] = {"id": Blocks.ITEM_STRING, "count": 1}
+	player.crafting[3] = {"id": Blocks.ITEM_STICK, "count": 1}
+	player.crafting[5] = {"id": Blocks.ITEM_STRING, "count": 1}
+	player.crafting[7] = {"id": Blocks.ITEM_STICK, "count": 1}
+	player.crafting[8] = {"id": Blocks.ITEM_STRING, "count": 1}
+	_check("three sticks and three string craft a bow",
+		int(player.craft_result()["id"]) == Blocks.ITEM_BOW)
+	player.table_available = false
+	for si11 in 9:
+		player.crafting[si11] = {"id": 0, "count": 0}
+	player.give(Blocks.ITEM_BOW, 1)
+	player.give(Blocks.ITEM_ARROW, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_BOW))
+	var bow_arrows: int = player.count_of(Blocks.ITEM_ARROW)
+	var launched_before: int = projectiles.arrows.size()
+	_check("a barely drawn bow looses nothing",
+		not player._loose_arrow(0.05) and player.count_of(Blocks.ITEM_ARROW) == bow_arrows)
+	_check("a full draw looses an arrow and spends one",
+		player._loose_arrow(1.0) and projectiles.arrows.size() > launched_before
+		and player.count_of(Blocks.ITEM_ARROW) == bow_arrows - 1,
+		"%d arrows -> %d" % [bow_arrows, player.count_of(Blocks.ITEM_ARROW)])
+	_check("an empty quiver refuses to fire",
+		not player._loose_arrow(1.0) and player.count_of(Blocks.ITEM_ARROW) == 0)
+
+	# anvil: the one station that repairs rather than crafts, and it charges levels for it
+	for si12 in 9:
+		player.crafting[si12] = {"id": 0, "count": 0}
+	player.table_available = true
+	for bi in 3:
+		player.crafting[bi] = {"id": Blocks.IRON_BLOCK, "count": 1}
+	player.crafting[4] = {"id": Blocks.ITEM_IRON, "count": 1}
+	for bi2 in 3:
+		player.crafting[6 + bi2] = {"id": Blocks.ITEM_IRON, "count": 1}
+	_check("three blocks of iron and four ingots craft an anvil",
+		int(player.craft_result()["id"]) == Blocks.ANVIL)
+	player.table_available = false
+	for si13 in 9:
+		player.crafting[si13] = {"id": 0, "count": 0}
+	player.give(Blocks.ITEM_STONE_PICK, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_STONE_PICK))
+	player.selected_stack()["dur"] = 10
+	player.hotbar_changed.emit()
+	player.xp = 0
+	player.level = 0
+	player.add_xp(600)
+	var pick_max: int = Gear.max_durability(Blocks.ITEM_STONE_PICK)
+	var levels_before_repair: int = player.level
+	var anvil_x := sbx + 14
+	var anvil_z := sbz + 2
+	world.set_block(anvil_x, sby, anvil_z, Blocks.AIR)
+	world.set_block(anvil_x, sby, anvil_z, Blocks.ANVIL)
+	_on_anvil_used(Vector3i(anvil_x, sby, anvil_z))
+	_check("an anvil repairs a worn tool to full",
+		int(player.selected_stack()["dur"]) == pick_max,
+		"%d of %d" % [int(player.selected_stack()["dur"]), pick_max])
+	_check("the repair was paid for in levels", player.level < levels_before_repair,
+		"%d -> %d" % [levels_before_repair, player.level])
+	_check("a tool at full wear has nothing to repair",
+		player.repair_cost() == -1 and not player.repair_held())
+
+	# brewing stand: the same potion the grid makes, without needing a table
+	for si14 in 9:
+		player.crafting[si14] = {"id": 0, "count": 0}
+	player.table_available = true
+	player.crafting[1] = {"id": Blocks.TORCH, "count": 1}
+	for ci in 3:
+		player.crafting[3 + ci] = {"id": Blocks.COBBLESTONE, "count": 1}
+	_check("a torch over three cobblestone crafts a brewing stand",
+		int(player.craft_result()["id"]) == Blocks.BREWING_STAND)
+	player.table_available = false
+	for si15 in 9:
+		player.crafting[si15] = {"id": 0, "count": 0}
+	player.give(Blocks.BREWING_STAND, 1)
+	player.give(Blocks.ITEM_FEATHER, 1)
+	player.give(Blocks.GLASS, 2)
+	player.select_slot(_slot_of(Blocks.ITEM_FEATHER))
+	var brew_x := sbx + 16
+	var brew_z := sbz + 2
+	world.set_block(brew_x, sby, brew_z, Blocks.AIR)
+	world.set_block(brew_x, sby, brew_z, Blocks.BREWING_STAND)
+	var glass_before: int = player.count_of(Blocks.GLASS)
+	_on_brew_used(Vector3i(brew_x, sby, brew_z))
+	_check("a brewing stand brews the potion its reagent makes",
+		player.count_of(Blocks.ITEM_POTION_SWIFTNESS) == 1,
+		str(player.count_of(Blocks.ITEM_POTION_SWIFTNESS)))
+	_check("brewing spends the reagent and a pane of glass",
+		player.count_of(Blocks.ITEM_FEATHER) == 0
+		and player.count_of(Blocks.GLASS) == glass_before - 1,
+		"%d glass left" % player.count_of(Blocks.GLASS))
+	_check("a stand has no recipe for a reagent that is not one",
+		player.brew_result(Blocks.ITEM_COAL) == 0)
+
+	# hopper: one item a step down the line, out of the chest above into the one below
+	var hop_x := sbx + 18
+	var hop_z := sbz + 2
+	world.set_block(hop_x, sby + 1, hop_z, Blocks.AIR)
+	world.set_block(hop_x, sby, hop_z, Blocks.AIR)
+	world.set_block(hop_x, sby - 1, hop_z, Blocks.AIR)
+	world.set_block(hop_x, sby + 1, hop_z, Blocks.CHEST)
+	world.set_block(hop_x, sby, hop_z, Blocks.HOPPER)
+	world.set_block(hop_x, sby - 1, hop_z, Blocks.CHEST)
+	var hop_top: Array = containers.chest_at(Vector3i(hop_x, sby + 1, hop_z))
+	var hop_bot: Array = containers.chest_at(Vector3i(hop_x, sby - 1, hop_z))
+	hop_top[0] = {"id": Blocks.ITEM_IRON, "count": 3}
+	containers._hopper_step(Vector3i(hop_x, sby, hop_z))
+	_check("a hopper passes one item from the container above to the one below",
+		int(hop_top[0]["count"]) == 2 and int(hop_bot[0]["id"]) == Blocks.ITEM_IRON
+		and int(hop_bot[0]["count"]) == 1,
+		"above %d, below %d" % [int(hop_top[0]["count"]), int(hop_bot[0]["count"])])
+	hop_top[0] = {"id": 0, "count": 0}
+	_check("a hopper with an empty source moves nothing",
+		not containers._hopper_step(Vector3i(hop_x, sby, hop_z)))
+	for si16 in 9:
+		player.crafting[si16] = {"id": 0, "count": 0}
+	player.table_available = true
+	for hx in [0, 2, 3, 5, 7]:
+		player.crafting[hx] = {"id": Blocks.ITEM_IRON, "count": 1}
+	player.crafting[4] = {"id": Blocks.CHEST, "count": 1}
+	_check("five iron and a chest craft a hopper",
+		int(player.craft_result()["id"]) == Blocks.HOPPER)
+	player.table_available = false
+	for si17 in 9:
+		player.crafting[si17] = {"id": 0, "count": 0}
+
+	# observer and comparator: the two parts of the power set that sense rather than store
+	_check("an observer and a comparator are directional",
+		world.circuit.is_directional(Blocks.OBSERVER)
+		and world.circuit.is_directional(Blocks.COMPARATOR))
+	var ob_x := sbx + 20
+	var ob_z := sbz + 2
+	var ob_pos := Vector3i(ob_x, sby, ob_z)
+	var ob_watch: Vector3i = ob_pos + Vector3i(0, 0, 1)
+	world.set_block(ob_watch.x, ob_watch.y, ob_watch.z, Blocks.AIR)
+	world.set_block(ob_x, sby, ob_z, Blocks.AIR)
+	world.set_block(ob_x, sby, ob_z, Blocks.OBSERVER)
+	# where a placement points depends on where the player was looking, so the test pins
+	# the facing rather than inheriting whatever the last placement in the suite left
+	world.circuit.state[ob_pos]["facing"] = Vector3i(0, 0, 1)
+	world.circuit.mark(ob_pos)
+	world.circuit.update(0.3)
+	_check("an observer watching a quiet cell outputs nothing",
+		world.circuit.level_at(ob_pos) == 0, str(world.circuit.level_at(ob_pos)))
+	world.set_block(ob_watch.x, ob_watch.y, ob_watch.z, Blocks.STONE)
+	world.circuit.update(0.0)
+	_check("a change in the cell an observer watches pulses it",
+		world.circuit.level_at(ob_pos) > 0, str(world.circuit.level_at(ob_pos)))
+	world.circuit.update(0.2)
+	_check("the observer's pulse lasts a single tick",
+		world.circuit.level_at(ob_pos) == 0, str(world.circuit.level_at(ob_pos)))
+
+	var cp_pos := Vector3i(sbx + 22, sby, sbz + 2)
+	world.set_block(cp_pos.x, cp_pos.y, cp_pos.z, Blocks.AIR)
+	world.set_block(cp_pos.x, cp_pos.y, cp_pos.z, Blocks.COMPARATOR)
+	world.circuit.state[cp_pos]["facing"] = Vector3i(0, 0, 1)
+	# a comparator reads the container it is pointed away from, so that goes behind it
+	var cp_back: Vector3i = cp_pos + Vector3i(0, 0, -1)
+	world.set_block(cp_back.x, cp_back.y, cp_back.z, Blocks.CHEST)
+	var cp_cells: Array = containers.chest_at(cp_back)
+	world.circuit.mark(cp_pos)
+	world.circuit.update(0.0)
+	_check("a comparator reads an empty container as nothing",
+		world.circuit.level_at(cp_pos) == 0, str(world.circuit.level_at(cp_pos)))
+	for ci2 in 2:
+		cp_cells[ci2] = {"id": Blocks.ITEM_IRON, "count": 64}
+	world.circuit.mark(cp_pos)
+	world.circuit.update(0.0)
+	var cp_part: int = world.circuit.level_at(cp_pos)
+	_check("a part-full container reads a middling level", cp_part > 0 and cp_part < 15,
+		str(cp_part))
+	for ci3 in range(2, 27):
+		cp_cells[ci3] = {"id": Blocks.ITEM_IRON, "count": 64}
+	world.circuit.mark(cp_pos)
+	world.circuit.update(0.0)
+	_check("a full container reads the top level", world.circuit.level_at(cp_pos) == 15,
+		str(world.circuit.level_at(cp_pos)))
+
+	# the village's guard and the trader out in the wild
+	var golem = mobs.spawn_at("iron_golem", player.global_position + Vector3(2, 0, 2))
+	_check("an iron golem is not hostile", not golem.is_hostile())
+	_check("an iron golem has a golem's health", golem.health == 100.0, "%.0f" % golem.health)
+	var guard_prey = mobs.spawn_at("zombie", golem.global_position + Vector3(1.5, 0, 0))
+	var prey_hp: float = guard_prey.health
+	golem.tick(0.1, player.global_position)
+	_check("a golem strikes a hostile mob that stands next to it",
+		guard_prey.health < prey_hp, "%.0f -> %.0f" % [prey_hp, guard_prey.health])
+	golem.hurt_mob(1000.0)
+	guard_prey.hurt_mob(1000.0)
+	var trader = mobs.spawn_at("wandering_trader", player.global_position + Vector3(3, 0, 3))
+	_check("a wandering trader keeps a stall of its own, not a villager's profession",
+		str(trader.profession) == "Trader", str(trader.profession))
+	_check("and it does not run away from you", not bool(trader.def.get("flee", true)))
+	trader.hurt_mob(1000.0)
+
+	# beacon: a 3x3 of mineral blocks under it is what turns one on
+	for si18 in 9:
+		player.crafting[si18] = {"id": 0, "count": 0}
+	player.table_available = true
+	for oi in [0, 1, 2, 3, 5, 6, 7, 8]:
+		player.crafting[oi] = {"id": Blocks.OBSIDIAN, "count": 1}
+	player.crafting[4] = {"id": Blocks.ITEM_DIAMOND, "count": 1}
+	_check("eight obsidian round a diamond craft a beacon",
+		int(player.craft_result()["id"]) == Blocks.BEACON)
+	player.table_available = false
+	for si19 in 9:
+		player.crafting[si19] = {"id": 0, "count": 0}
+	var be_x := sbx + 8
+	var be_z := sbz + 2
+	world.set_block(be_x, sby + 1, be_z, Blocks.AIR)
+	world.set_block(be_x, sby + 1, be_z, Blocks.BEACON)
+	player.effects.clear()
+	_tick_beacons(2.0)
+	_check("a beacon with nothing under it does nothing", not player.has_effect("regen"))
+	for gdz in [-1, 0, 1]:
+		for gdx in [-1, 0, 1]:
+			world.set_block(be_x + gdx, sby, be_z + gdz, Blocks.IRON_BLOCK)
+	player.effects.clear()
+	_tick_beacons(2.0)
+	_check("a beacon on a 3x3 of iron blocks heals whoever is near",
+		player.has_effect("regen"))
+	player.effects.clear()
+
+	# vehicles: a cart rolls and a boat floats, and both are got into with a right-click
+	for si20 in 9:
+		player.crafting[si20] = {"id": 0, "count": 0}
+	player.table_available = true
+	player.crafting[0] = {"id": Blocks.ITEM_IRON, "count": 1}
+	player.crafting[2] = {"id": Blocks.ITEM_IRON, "count": 1}
+	for ui in 3:
+		player.crafting[3 + ui] = {"id": Blocks.ITEM_IRON, "count": 1}
+	_check("a U of five iron ingots crafts a minecart",
+		int(player.craft_result()["id"]) == Blocks.ITEM_MINECART)
+	for si21 in 9:
+		player.crafting[si21] = {"id": 0, "count": 0}
+	player.crafting[0] = {"id": Blocks.PLANKS, "count": 1}
+	player.crafting[2] = {"id": Blocks.PLANKS, "count": 1}
+	for ui2 in 3:
+		player.crafting[3 + ui2] = {"id": Blocks.PLANKS, "count": 1}
+	_check("the same U of planks crafts a boat",
+		int(player.craft_result()["id"]) == Blocks.ITEM_BOAT)
+	for si22 in 9:
+		player.crafting[si22] = {"id": 0, "count": 0}
+	for ri in [0, 2, 3, 5, 6, 8]:
+		player.crafting[ri] = {"id": Blocks.ITEM_IRON, "count": 1}
+	player.crafting[4] = {"id": Blocks.ITEM_STICK, "count": 1}
+	_check("six ingots round a stick craft sixteen rails",
+		int(player.craft_result()["id"]) == Blocks.RAIL
+		and int(player.craft_result()["count"]) == 16)
+	player.table_available = false
+	for si23 in 9:
+		player.crafting[si23] = {"id": 0, "count": 0}
+
+	var cart = vehicles.spawn("minecart", player.global_position + Vector3(1.2, 0.2, 0))
+	_check("a cart spawns as a minecart", str(cart.kind) == "minecart")
+	_check("a cart's top speed on bare ground is its base speed", cart.top_speed() == 7.0,
+		str(cart.top_speed()))
+	# the pick-up: a click aimed at it gets the player in, and a shift gets them out
+	var seen = vehicles.raycast_vehicle(player.eye_position(),
+		(cart.global_position + Vector3(0, 0.3, 0) - player.eye_position()).normalized(), 8.0)
+	_check("the vehicle raycast finds the cart under the crosshair", seen == cart)
+	_check("right-clicking a cart gets you into it",
+		player._vehicle_action(cart) and player.riding == cart and cart.rider == player)
+	player._leave_vehicle()
+	_check("leaving puts you beside the cart, not inside it",
+		player.riding == null and cart.rider == null
+		and player.global_position.distance_to(cart.global_position) > 0.5,
+		"%.1f apart" % player.global_position.distance_to(cart.global_position))
+	vehicles.reset()
+
+	# and one on a floor of its own, so the fall is measured rather than guessed at
+	var vx := sbx + 24
+	var vz := sbz + 2
+	world.set_block(vx, sby - 1, vz, Blocks.STONE)
+	var cart2 = vehicles.spawn("minecart",
+		Vector3(float(vx) + 0.5, float(sby) + 0.6, float(vz) + 0.5))
+	for ti in 40:
+		cart2.tick(0.05)
+	_check("a cart falls and comes to rest on the ground", cart2.on_ground,
+		str(cart2.global_position.y))
+	# a rail is a floor of its own kind: the cell under the cart becomes a track
+	world.set_block(vx, sby - 1, vz, Blocks.RAIL)
+	_check("a rail under it raises its top speed", cart2.top_speed() == 11.0,
+		str(cart2.top_speed()))
+	var boat = vehicles.spawn("boat", Vector3(float(vx) + 0.5, float(sby) + 0.6, float(vz) + 0.5))
+	_check("a boat is a boat", str(boat.kind) == "boat")
+	_check("a boat's top speed is lower than a cart's", boat.top_speed() < cart.top_speed(),
+		str(boat.top_speed()))
+	vehicles.reset()
+	_check("both vehicles have names",
+		Blocks.display_name(Blocks.ITEM_MINECART) == "Minecart"
+		and Blocks.display_name(Blocks.ITEM_BOAT) == "Boat")
+
+	# potions: brewed from glass and a reagent, drunk for an effect, thrown as a splash
+	# The bag is emptied first: by this point in the run every slot is full, and `give`
+	# silently fails on a full bag, which would make the checks below triply misleading.
+	player.reset_inventory()
+	player.crafting[0] = {"id": Blocks.GLASS, "count": 1}
+	player.crafting[1] = {"id": Blocks.ITEM_FEATHER, "count": 1}
+	_check("glass and a feather brew a potion of swiftness",
+		int(player.craft_result()["id"]) == Blocks.ITEM_POTION_SWIFTNESS)
+	for si9 in 9:
+		player.crafting[si9] = {"id": 0, "count": 0}
+	player.give(Blocks.ITEM_POTION_STRENGTH, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_POTION_STRENGTH))
+	player.effects.clear()
+	_check("drinking a potion applies its effect and spends it",
+		player._item_use({}) and player.has_effect("strength")
+		and player.count_of(Blocks.ITEM_POTION_STRENGTH) == 0)
+	_check("strength raises melee damage", player._melee_bonus() > 0.0)
+	player.give(Blocks.ITEM_POTION_SPLASH_REGEN, 1)
+	player.select_slot(_slot_of(Blocks.ITEM_POTION_SPLASH_REGEN))
+	player.effects.clear()
+	var near = mobs.spawn_at("pig", player.global_position + Vector3(1.0, 0.0, 0.0))
+	var here := Vector3i(floori(player.global_position.x), floori(player.global_position.y),
+		floori(player.global_position.z))
+	_check("a splash potion affects the thrower and a mob nearby",
+		player._item_use({"pos": here}) and player.has_effect("regen") and near.has_effect("regen"))
+	player._tick_effects(400.0)
+	_check("potion effects run down", not player.has_effect("regen"))
+	# clear the animals this section made, so nothing wanders into a later check
+	for m in [cow_a, cow_b, sheep, wolf, baby, near]:
+		if m != null and is_instance_valid(m):
+			m.hurt_mob(1000.0)
+
 	# 15. the advancement system: rule matching, counted goals, thresholds and the round
 	# trip through the save file. Checked against the definitions themselves, so a
 	# milestone that stops matching its event is caught rather than silently missing.
@@ -2622,6 +3446,108 @@ func _run_selftest() -> void:
 	_remove_dir("%s/%s" % [SAVE_ROOT, saved_dir])
 	_check("the test cleans up the world it saved",
 		not FileAccess.file_exists("%s/%s/level.json" % [SAVE_ROOT, saved_dir]), saved_dir)
+
+	# ---- the nether: a dimension of its own, and the doorway that leads to it
+	# The generator is exercised directly first, because a chunk is a pure function of the
+	# seed and a dimension flag and needs no world to be built around it.
+	var ng := VoxelTerrain.new(4242, 1)
+	var ncore: Dictionary = ng.fill_chunk(0, 0)
+	var nsec: Dictionary = ncore["sections"]
+	_check("the nether keeps its own dimension flag", int(ng.dim) == 1)
+	_check("the nether allocates a deep band of sections", nsec.size() >= 8,
+		"sections=%d" % nsec.size())
+	var bed_sec: int = VoxelTerrain.sec_of(VoxelTerrain.MIN_Y)
+	var bed_arr: PackedByteArray = nsec[bed_sec]
+	_check("the nether has a bedrock floor", int(bed_arr[0]) == Blocks.BEDROCK,
+		"floor=%d" % int(bed_arr[0]))
+	var roof_y: int = VoxelTerrain.NETHER_ROOF
+	var roof_sec: int = VoxelTerrain.sec_of(roof_y)
+	var roof_arr: PackedByteArray = nsec[roof_sec]
+	var roof_idx: int = VoxelTerrain.ly_of(roof_y) * VoxelTerrain.CHUNK * VoxelTerrain.CHUNK
+	_check("the nether has a bedrock roof", int(roof_arr[roof_idx]) == Blocks.BEDROCK,
+		"roof=%d" % int(roof_arr[roof_idx]))
+	var net_lava := 0
+	var net_quartz := 0
+	var net_air := 0
+	for s in nsec:
+		var a: PackedByteArray = nsec[s]
+		for b in a:
+			if b == Blocks.LAVA:
+				net_lava += 1
+			elif b == Blocks.NETHER_QUARTZ_ORE:
+				net_quartz += 1
+			elif b == Blocks.AIR:
+				net_air += 1
+	_check("the nether has a lava sea", net_lava > 100, "lava=%d" % net_lava)
+	_check("the nether is mostly open cavern, not solid rock", net_air > 4000,
+		"air=%d" % net_air)
+	_check("the nether carries quartz in its rock", net_quartz > 0, "quartz=%d" % net_quartz)
+	var ng2 := VoxelTerrain.new(4242, 1)
+	var ncore2: Dictionary = ng2.fill_chunk(0, 0)
+	_check("the nether is deterministic from the seed",
+		ncore2["sections"][bed_sec] == bed_arr)
+	var nspawn: Vector3 = ng.find_spawn()
+	_check("the nether's spawn stands clear of the lava sea",
+		nspawn.y > float(VoxelTerrain.NETHER_LAVA) + 1.0, "y=%.1f" % nspawn.y)
+
+	# the doorway: a hand-built obsidian ring has to light, an open pocket of air must not
+	# a small render distance keeps the two dimension switches below cheap: each one has to
+	# generate and mesh a fresh set of chunk columns, and at distance four that is minutes
+	world.render_distance = 2
+	world.request_rebuild()
+	var bx := floori(player.global_position.x) + 6
+	var bz := floori(player.global_position.z) + 6
+	var by: int = world.portal_ground(bx, bz)
+	_check("the test portal has standable ground under it", by > 0, "by=%d" % by)
+	if by > 0:
+		for pdx in range(-1, 3):
+			for pdy in range(-1, 4):
+				if pdx == -1 or pdx == 2 or pdy == -1 or pdy == 3:
+					world.set_block(bx + pdx, by + pdy, bz, Blocks.OBSIDIAN)
+		# the doorway itself has to be open air: the ground the ring stands on may still fill
+		# one of the two columns, and a doorway with rock in it is not a doorway
+		for pdx in range(0, 2):
+			for pdy in range(0, 3):
+				world.set_block(bx + pdx, by + pdy, bz, Blocks.AIR)
+		_check("an obsidian ring can be lit", world.ignite_portal(Vector3i(bx, by, bz)))
+		_check("the doorway fills with portal blocks",
+			world.get_block(bx, by, bz) == Blocks.NETHER_PORTAL
+				and world.get_block(bx + 1, by + 2, bz) == Blocks.NETHER_PORTAL,
+			"a=%d b=%d" % [world.get_block(bx, by, bz),
+				world.get_block(bx + 1, by + 2, bz)])
+		_check("an open pocket of air does not light",
+			not world.ignite_portal(Vector3i(bx, by + 40, bz)))
+
+		# and the whole trip, driven by the real doorway check rather than by calling the
+		# switch directly: stand in the lit doorway and let it take the player through
+		mode = Mode.PLAY
+		_travel_cooldown = 0.0
+		player.place_at(Vector3(bx + 0.5, by + 0.1, bz + 0.5))
+		for i in 3000:
+			if world.dimension == 1 and not _travelling and mode == Mode.PLAY:
+				break
+			await get_tree().process_frame
+		_check("standing in a doorway travels to the nether", world.dimension == 1,
+			"dim=%d" % world.dimension)
+		_check("the nether streams its own chunks", world.loaded_chunks() > 10,
+			"chunks=%d" % world.loaded_chunks())
+		_check("the player arrives above the lava sea",
+			player.global_position.y > float(VoxelTerrain.NETHER_LAVA),
+			"y=%.1f" % player.global_position.y)
+		_check("the sky is in its nether mode", int(sky.dim) == 1)
+		# a standable-spot search starting from the heightmap would find the top of the
+		# bedrock roof -- a flat ledge with open sky over it, outside the world entirely
+		var safe: Vector3 = world.safe_spawn_near(player.global_position + Vector3(8, 0, 8))
+		_check("a nether safe spot stays inside the cavern, not up on the roof",
+			safe.y <= float(VoxelTerrain.NETHER_TOP), "y=%.1f" % safe.y)
+		for i in 3000:
+			if world.dimension == 0 and not _travelling and mode == Mode.PLAY:
+				break
+			await get_tree().process_frame
+		_check("the doorway brings the player home again", world.dimension == 0,
+			"dim=%d" % world.dimension)
+		_check("the overworld's chunks come back with it", world.loaded_chunks() > 10,
+			"chunks=%d" % world.loaded_chunks())
 
 	print("=== selftest: %d passed, %d failed ===" % [_pass, _fail])
 
@@ -3636,6 +4562,25 @@ func _hand_test() -> void:
 			and hint_text.contains(Items.name_of(Blocks.INVERTER)),
 		"n=%d relay=%s" % [hints.size(), Items.name_of(Blocks.RELAY)])
 
+	# ---- the creative palette. Every block, and every pure item, has to be reachable from
+	# some tab: a hand-kept item list had quietly gone stale and left flint and steel, the
+	# bow, the boat and the potions -- and later the nether's drops -- in no tab at all,
+	# where a creative player simply could not obtain them.
+	var reachable: Dictionary = {}
+	for cat in range(0, 6):
+		for pid in hud._palette_ids(cat):
+			reachable[int(pid)] = true
+	var unreachable: Array = []
+	for i in range(1, 256):
+		if Blocks.defs[i] != null and i != Blocks.WATER and i != Blocks.BED_HEAD \
+				and not reachable.has(i):
+			unreachable.append(i)
+	for i in range(256, 512):
+		if Blocks.defs[i] == null and Blocks.display_name(i) != "?" and not reachable.has(i):
+			unreachable.append(i)
+	_check("every block and item is reachable from a creative tab", unreachable.is_empty(),
+		"missing=%s" % str(unreachable))
+
 	# ---- language, framerate cap and render packs
 	# the English source is also the key, so a missing translation still shows
 	# English rather than a raw identifier
@@ -4180,6 +5125,8 @@ func _check_capture() -> void:
 			_capture = "heldlight"
 		elif a == "--capture-bed":
 			_capture = "bed"
+		elif a == "--capture-nether":
+			_capture = "nether"
 		elif a == "--capture-birch":
 			_capture = "birch"
 		elif a == "--capture-village":
@@ -4512,6 +5459,70 @@ func _run_capture() -> void:
 			await _settle()
 			player.pitch = -0.12
 			await _shot("birch_forest.png")
+		"nether":
+			# the dimension has to be looked at, not just asserted on: only a screenshot
+			# shows whether the caverns, the glowstone and the red haze come out as a place
+			# rather than as a cave with the sky turned orange
+			_on_new_world("Preview", _capture_seed, true, 6)
+			await _wait_loaded()
+			# Switched straight in rather than through a doorway: a doorway is built on the
+			# shelf the player lands on, and its own portal block then fills the whole frame
+			# from the inside. The travel path itself is covered by the selftest.
+			_travelling = true
+			player.set_physics_process(false)
+			mode = Mode.LOADING
+			world.set_dimension(1)
+			containers.set_dimension(1)
+			sky.set_dimension(1)
+			var spot: Vector3 = world.terrain.find_spawn()
+			await _stream_at(spot)
+			player.place_at(spot + Vector3(0, 0.4, 0))
+			player.set_physics_process(true)
+			mode = Mode.PLAY
+			_travelling = false
+			sky.running = false
+			player.creative = true
+			player.flying = true
+			player.pitch = -0.14
+			player.yaw = 0.6
+			await _settle()
+			await _shot("nether.png")
+			# and a second look from up in the cavern, tilted down over the ground
+			player.place_at(player.global_position + Vector3(0, 12, 0))
+			player.pitch = -0.55
+			await _settle()
+			await _shot("nether_cavern.png")
+			# and a third from the first low ledge nearby, looking over the lava sea and
+			# whatever soul sand and magma lie along it
+			var low := Vector3.ZERO
+			var found := false
+			for ring in range(4, 80, 4):
+				for a in range(0, maxi(1, ring * 4)):
+					var ang := TAU * float(a) / float(maxi(1, ring * 4))
+					var wx := floori(player.global_position.x) + int(cos(ang) * float(ring))
+					var wz := floori(player.global_position.z) + int(sin(ang) * float(ring))
+					if not world.chunks.has(Vector2i(wx >> 4, wz >> 4)):
+						continue
+					var fy: int = world.terrain.nether_floor_at(wx, wz)
+					if fy < VoxelTerrain.NETHER_LAVA + 1 or fy > VoxelTerrain.NETHER_LAVA + 4:
+						continue
+					# only a column that really is open above its floor, so the camera is not
+					# dropped inside rock
+					if world.get_block(wx, fy + 1, wz) != Blocks.AIR \
+							or world.get_block(wx, fy + 4, wz) != Blocks.AIR:
+						continue
+					low = Vector3(float(wx) + 0.5, float(fy) + 2.0, float(wz) + 0.5)
+					found = true
+					break
+				if found:
+					break
+			print("nether low ledge found=", found, " at ", low)
+			if found:
+				player.place_at(low)
+				player.pitch = -0.30
+				player.yaw = -2.2
+				await _settle()
+				await _shot("nether_lava.png")
 		"advancements":
 			# the progress screen: earn a spread of milestones so the shot shows finished
 			# rows next to dimmed locked ones, and the two counted goals part-way through

@@ -80,6 +80,9 @@ const HELD_LIGHT := {
 ## the eye 0.02 from it, inside the camera's near plane, and the world goes see-through.
 ## The offset is therefore pulled in per-frame to whatever room there actually is.
 const FP_CAM_FORWARD := 0.28
+## How long a bow has to be held to reach a full draw. Speed and damage scale with the
+## fraction reached, and a draw let go almost at once does not loose anything at all.
+const BOW_DRAW_TIME := 1.0
 
 signal health_changed
 signal hunger_changed
@@ -104,6 +107,10 @@ signal mob_dropped(id: int, count: int, pos: Vector3)
 signal tnt_lit(pos: Vector3i)
 ## An arrow was fed to a dispenser. main launches it, since projectiles live there.
 signal dispenser_fired(pos: Vector3i, dir: Vector3)
+## A drawn bow was released. main launches the arrow, for the same reason.
+signal bow_shot(origin: Vector3, dir: Vector3, speed: float, dmg: float)
+## The player got into a vehicle. main counts it for the milestone.
+signal vehicle_entered(kind: String)
 
 var world
 var camera: Camera3D
@@ -174,6 +181,7 @@ var _step_dist := 0.0
 var _sprint_toggle := false
 var _reach := REACH
 var mobs = null              # injected by main: the melee swing's mob raycast
+var vehicles = null          # injected by main: the right-click's vehicle raycast
 var _starve_timer := 0.0
 
 # ---- potions: effect name -> seconds left. Swiftness, Regeneration, Strength and Night
@@ -184,6 +192,13 @@ var _regen_t := 0.0
 var _bobber: MeshInstance3D = null
 var _bob_t := 0.0
 var _bitten := false
+## The bow's draw: how long `use` has been held, and whether it is being held at all.
+## Zero seconds of draw is a shot that never happened, which is why the two are separate.
+var _drawing := false
+var _draw_t := 0.0
+## The vehicle being ridden, if any. While this is set the player's own movement is off and
+## the vehicle is driven instead, so there is exactly one thing integrating the pair.
+var riding = null
 
 var _searching := {}
 
@@ -573,6 +588,13 @@ func _physics_process(delta: float) -> void:
 		velocity.x = 0.0
 		velocity.z = 0.0
 		return
+
+	# Riding: the vehicle does the moving and the colliding, and the player is carried with
+	# it. This sits above everything else so nothing else integrates the pair as well.
+	if riding != null and is_instance_valid(riding):
+		_tick_ride(delta)
+		return
+	riding = null
 
 	var water := in_water()
 	var lava := in_lava()
@@ -1003,7 +1025,24 @@ func _update_interaction(delta: float) -> void:
 		_dig_progress = 0.0
 		_dig_target = Vector3i(-9999, 0, 0)
 
-	if Input.is_action_pressed("use") and _place_cooldown <= 0.0:
+	# The bow is the one item that cares about the button being *held* rather than clicked:
+	# the draw builds while `use` is down and the arrow leaves on release. That is why it
+	# sits above the place/eat path -- `_item_use` only ever sees a press, and a bow fired
+	# on the press would be a one-frame shot whatever you did with the button afterwards.
+	if selected_id() == Blocks.ITEM_BOW:
+		if Input.is_action_just_pressed("use"):
+			_drawing = true
+			_draw_t = 0.0
+		if _drawing and Input.is_action_pressed("use"):
+			_draw_t = minf(_draw_t + delta, BOW_DRAW_TIME)
+		if _drawing and Input.is_action_just_released("use"):
+			_loose_arrow(_draw_t)
+			_drawing = false
+	elif _drawing:
+		# the slot changed mid-draw: let the draw go rather than firing it from a new slot
+		_drawing = false
+
+	if not _drawing and Input.is_action_pressed("use") and _place_cooldown <= 0.0:
 		_place_cooldown = 0.20
 		if not eat_selected():
 			_try_place()
@@ -1114,7 +1153,10 @@ func _farm_action(hit: Dictionary, hp: Vector3i, hid: int) -> bool:
 func _item_use(hit: Dictionary) -> bool:
 	var held := selected_id()
 	if held == Blocks.ITEM_FLINT_STEEL:
-		return _light_tnt(hit)
+		# flint and steel does two jobs: it lights a fuse, and it lights a doorway
+		if _light_tnt(hit):
+			return true
+		return _ignite_portal(hit)
 	if held == Blocks.ITEM_FISHING_ROD:
 		return _fishing_use(hit)
 	if _is_potion(held):
@@ -1123,6 +1165,8 @@ func _item_use(hit: Dictionary) -> bool:
 		return _throw_potion(held, hit)
 	if held == Blocks.ITEM_ARROW:
 		return _dispenser_fire(hit)
+	if held == Blocks.ITEM_MINECART or held == Blocks.ITEM_BOAT:
+		return _place_vehicle(held, hit)
 	if held != Blocks.ITEM_ENDER_PEARL:
 		return false
 	var eye := eye_position()
@@ -1185,6 +1229,25 @@ func _dispenser_fire(hit: Dictionary) -> bool:
 	return true
 
 
+## Loose a drawn bow: an arrow out of the quiver, along the aim, with the speed and bite the
+## draw earned it. True only when a shot actually left -- a flick of the button, or an empty
+## quiver, just clicks.
+func _loose_arrow(charge: float) -> bool:
+	var frac := clampf(charge / BOW_DRAW_TIME, 0.0, 1.0)
+	if frac < 0.15:
+		Sfx.play("click", -14.0, 1.2)
+		return false
+	if not creative and remove_count(Blocks.ITEM_ARROW, 1) < 1:
+		Sfx.play("click", -14.0, 1.2)
+		return false
+	bow_shot.emit(eye_position() + look_dir() * 0.6, look_dir(),
+		lerpf(16.0, 55.0, frac), lerpf(2.0, 7.0, frac))
+	Advancements.trigger("bow")
+	swing_t = 0.8
+	Sfx.play("bow", -5.0, 1.0)
+	return true
+
+
 ## Flint and steel lights a TNT block's fuse. main runs the fuse and the blast; this only
 ## arms it.
 func _light_tnt(hit: Dictionary) -> bool:
@@ -1197,6 +1260,24 @@ func _light_tnt(hit: Dictionary) -> bool:
 	swing_t = 0.9
 	tool_damage_selected(1)
 	Sfx.play("click", -6.0, 1.3)
+	return true
+
+
+## Flint and steel on an obsidian frame: the cell in front of the face is the doorway's
+## open space, and `world.ignite_portal` decides whether it really is one. Lighting a portal
+## is not a change of its own -- the portal block is placed by world.gd -- so this only has
+## to find the cell and pass it on.
+func _ignite_portal(hit: Dictionary) -> bool:
+	if hit.is_empty():
+		return false
+	var cell: Vector3i = hit["prev"]
+	if world.get_block(cell.x, cell.y, cell.z) != Blocks.AIR:
+		return false
+	if not world.ignite_portal(cell):
+		return false
+	swing_t = 0.9
+	tool_damage_selected(1)
+	Sfx.play("splash", -6.0, 0.7)
 	return true
 
 
@@ -1272,8 +1353,118 @@ func _throw_potion(id: int, hit: Dictionary) -> bool:
 	return true
 
 
+## Which potion a reagent brews at a brewing stand. The reagents are the same ones the
+## crafting-grid recipes use, so the station and the grid agree on what makes what.
+func brew_result(reagent: int) -> int:
+	match reagent:
+		Blocks.ITEM_FEATHER:
+			return Blocks.ITEM_POTION_SWIFTNESS
+		Blocks.ITEM_SLIME_BALL:
+			return Blocks.ITEM_POTION_REGEN
+		Blocks.ITEM_BONE:
+			return Blocks.ITEM_POTION_STRENGTH
+		Blocks.GLOWSTONE:
+			return Blocks.ITEM_POTION_NIGHT
+	return 0
+
+
+## Brew at a stand: the reagent out of your hand and a pane of glass out of the bag, for
+## the potion that reagent makes. True when something was actually brewed.
+func brew_selected() -> bool:
+	var potion := brew_result(selected_id())
+	if potion <= 0:
+		return false
+	if not creative:
+		if count_of(Blocks.GLASS) < 1:
+			return false
+		remove_count(Blocks.GLASS, 1)
+		consume_selected(1)
+	give(potion, 1)
+	return true
+
+
 func has_effect(name: String) -> bool:
 	return effects.has(name)
+
+
+# ================================================================ vehicles
+## How a vehicle reference reaches the player, the same way the mob manager does.
+func set_vehicles(v) -> void:
+	vehicles = v
+
+
+## One frame of riding: the player steers and is carried, and never integrates anything
+## itself. Shift gets out, which is also what Minecraft uses.
+func _tick_ride(delta: float) -> void:
+	velocity = Vector3.ZERO
+	var move := Vector3.ZERO
+	var basis := Basis(Vector3.UP, yaw)
+	if Input.is_action_pressed("forward"):
+		move += basis * Vector3(0, 0, -1)
+	if Input.is_action_pressed("back"):
+		move += basis * Vector3(0, 0, 1)
+	if Input.is_action_pressed("left"):
+		move += basis * Vector3(-1, 0, 0)
+	if Input.is_action_pressed("right"):
+		move += basis * Vector3(1, 0, 0)
+	riding.drive(move, delta)
+	global_position = riding.seat()
+	on_ground = riding.on_ground
+	if Input.is_action_just_pressed("sneak"):
+		_leave_vehicle()
+
+
+## A right-click aimed at a cart or a boat: get in if you are on foot, get out if you are
+## already in that one.
+func _vehicle_action(v) -> bool:
+	if riding == v:
+		_leave_vehicle()
+		return true
+	if riding != null:
+		return false
+	if eye_position().distance_to(v.global_position + Vector3(0, v.half().y, 0)) > _reach + 1.0:
+		return false
+	riding = v
+	v.rider = self
+	v.velocity = Vector3.ZERO
+	swing_t = 0.9
+	Sfx.play("click", -10.0, 1.1)
+	vehicle_entered.emit(str(v.kind))
+	return true
+
+
+## Step out, placed beside the vehicle rather than inside it: leaving the player at the
+## seat's own position puts them inside the vehicle's collision box, and they cannot move.
+func _leave_vehicle() -> void:
+	if riding == null:
+		return
+	var from = riding
+	riding = null
+	if is_instance_valid(from):
+		from.rider = null
+		var spot: Vector3 = from.global_position + Vector3(1.1, 0.0, 0.0)
+		var want: Vector3 = world.safe_spawn_near(spot)
+		global_position = Vector3(want.x, maxf(want.y, from.global_position.y), want.z)
+		velocity = Vector3.ZERO
+	swing_t = 0.9
+	Sfx.play("click", -11.0, 0.95)
+
+
+## A cart or a boat is not a block: right-clicking puts the vehicle itself on the ground in
+## front of you, the way Minecraft does.
+func _place_vehicle(id: int, hit: Dictionary) -> bool:
+	if hit.is_empty() or vehicles == null:
+		return false
+	var cell: Vector3i = hit["prev"]
+	if world.is_solid(cell.x, cell.y, cell.z):
+		return false
+	var kind := "minecart" if id == Blocks.ITEM_MINECART else "boat"
+	vehicles.spawn(kind, Vector3(float(cell.x) + 0.5, float(cell.y) + 0.02,
+		float(cell.z) + 0.5))
+	consume_selected(1)
+	swing_t = 0.9
+	Sfx.play("place", -8.0, 1.0)
+	return true
 
 
 func add_effect(name: String, secs: float) -> void:
@@ -1379,6 +1570,12 @@ func _tick_fishing(delta: float) -> void:
 
 func _try_place() -> void:
 	var hit: Dictionary = world.raycast(eye_position(), look_dir(), _reach)
+	# A cart or a boat under the crosshair is got into or out of, and that is answered
+	# before the block behind it, so riding never turns into placing.
+	if vehicles != null:
+		var vh = vehicles.raycast_vehicle(eye_position(), look_dir(), _reach)
+		if vh != null and _vehicle_action(vh):
+			return
 	# A villager under the crosshair is spoken to, not built over: right-click opens the
 	# trade screen. Answered here, before the block dispatch, so a villager standing on a
 	# block still trades rather than the block behind them being operated.
@@ -1388,7 +1585,9 @@ func _try_place() -> void:
 		# block under the crosshair is touched at all
 		if vm != null and _mob_action(vm):
 			return
-		if vm != null and str(vm.kind) == "villager":
+		if vm != null and str(vm.profession) != "":
+			# a shopkeeper is talked to rather than fed: both a villager and a wandering
+			# trader keep a profession, and that is the tell for "this one has a stall"
 			var vd: float = eye_position().distance_to(
 				vm.global_position + Vector3(0, float(vm._h) * 0.5, 0))
 			var bd := _reach + 1.0
@@ -1671,6 +1870,32 @@ func spend_levels(n: int) -> bool:
 ## The stack in the selected hotbar slot, for reading enchantments off it.
 func selected_stack() -> Dictionary:
 	return hotbar[selected]
+
+
+## What repairing the held tool on an anvil would cost, in experience levels, or -1 when
+## there is nothing to repair. The price rises with how far the tool has worn down, so a
+## nearly-new tool is cheap to top up and a nearly-broken one is not.
+func repair_cost() -> int:
+	var s: Dictionary = hotbar[selected]
+	var maxd := Gear.max_durability(int(s["id"]))
+	if maxd <= 0:
+		return -1
+	var missing := maxd - int(s.get("dur", maxd))
+	if missing <= 0:
+		return -1
+	return maxi(1, int(ceil(float(missing) / 100.0)))
+
+
+## Buy the held tool back to full durability with experience levels. False when there is
+## nothing to repair or the levels are not there; the caller does the talking either way.
+func repair_held() -> bool:
+	var cost := repair_cost()
+	if cost < 0 or not spend_levels(cost):
+		return false
+	var s: Dictionary = hotbar[selected]
+	s["dur"] = Gear.max_durability(int(s["id"]))
+	hotbar_changed.emit()
+	return true
 
 
 ## Wear the selected tool down by `n`. A tool that reaches zero wears out and leaves the
@@ -1967,6 +2192,39 @@ const RECIPES := [
 		"out": [Blocks.ITEM_POTION_SPLASH_STRENGTH, 1]},
 	{"type": "shapeless", "in": [Blocks.ITEM_POTION_NIGHT, Blocks.ITEM_GUNPOWDER],
 		"out": [Blocks.ITEM_POTION_SPLASH_NIGHT, 1]},
+	# the bow is the only weapon that has to be drawn before it does anything
+	{"type": "shaped", "pattern": [" SX", "S X", " SX"],
+		"key": {"S": Blocks.ITEM_STICK, "X": Blocks.ITEM_STRING}, "out": [Blocks.ITEM_BOW, 1]},
+	# three blocks of iron over one ingot over three more, the way Minecraft builds one
+	{"type": "shaped", "pattern": ["BBB", " I ", "III"],
+		"key": {"B": Blocks.IRON_BLOCK, "I": Blocks.ITEM_IRON}, "out": [Blocks.ANVIL, 1]},
+	# a flame over a stone base: the stand that brews without the crafting grid
+	{"type": "shaped", "pattern": [" T ", "CCC"],
+		"key": {"T": Blocks.TORCH, "C": Blocks.COBBLESTONE}, "out": [Blocks.BREWING_STAND, 1]},
+	# a funnel over a chest: the five ingots of Minecraft's hopper, round a chest
+	{"type": "shaped", "pattern": ["I I", "ICI", " I "],
+		"key": {"I": Blocks.ITEM_IRON, "C": Blocks.CHEST}, "out": [Blocks.HOPPER, 1]},
+	# reader and sensor: copper plays the part redstone plays in Minecraft
+	{"type": "shaped", "pattern": ["CCC", "CCQ", "CCC"],
+		"key": {"C": Blocks.COBBLESTONE, "Q": Blocks.ITEM_COPPER}, "out": [Blocks.OBSERVER, 1]},
+	{"type": "shaped", "pattern": [" S ", "SCS", " S "],
+		"key": {"S": Blocks.STONE, "C": Blocks.ITEM_COPPER}, "out": [Blocks.COMPARATOR, 1]},
+	# a beacon: obsidian round a diamond, the same ring Minecraft builds out of obsidian
+	# and a nether star
+	{"type": "shaped", "pattern": ["OOO", "ODO", "OOO"],
+		"key": {"O": Blocks.OBSIDIAN, "D": Blocks.ITEM_DIAMOND}, "out": [Blocks.BEACON, 1]},
+	# the vehicles: the same U of five, in iron for a cart and in planks for a boat
+	{"type": "shaped", "pattern": ["I I", "III"],
+		"key": {"I": Blocks.ITEM_IRON}, "out": [Blocks.ITEM_MINECART, 1]},
+	{"type": "shaped", "pattern": ["P P", "PPP"],
+		"key": {"P": Blocks.PLANKS}, "out": [Blocks.ITEM_BOAT, 1]},
+	# and the track they run on: six ingots round a stick, sixteen rails at a time
+	{"type": "shaped", "pattern": ["I I", "ISI", "I I"],
+		"key": {"I": Blocks.ITEM_IRON, "S": Blocks.ITEM_STICK}, "out": [Blocks.RAIL, 16]},
+
+	# --- the nether: four smelted bricks press into one block
+	{"type": "shaped", "pattern": ["BB", "BB"], "key": {"B": Blocks.ITEM_NETHER_BRICK},
+		"out": [Blocks.NETHER_BRICK_BLOCK, 1]},
 ]
 
 

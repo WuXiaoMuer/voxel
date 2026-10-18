@@ -9,6 +9,9 @@ const MAX_HOSTILE := 10
 const MAX_VILLAGERS := 8
 ## Wolves are their own small population: they live in the woods, not on the farm.
 const MAX_WOLVES := 5
+## A village keeps a guard or two, and there is never more than one trader about.
+const MAX_GOLEMS := 2
+const MAX_TRADERS := 1
 ## The species that can be bred by feeding them, and the two adults a pair needs.
 const BREEDABLE := ["pig", "cow", "sheep", "chicken"]
 const SPAWN_MIN := 18.0
@@ -70,6 +73,9 @@ func _spawn(kind: String, pos: Vector3):
 	m.setup(world, kind, pos)
 	if kind == "villager":
 		m.profession = _profession_at(pos)
+	elif kind == "wandering_trader":
+		# one trade, wherever it happens to be standing
+		m.profession = "Trader"
 	m.player = player
 	m.particles = particles
 	m.manager = self
@@ -121,10 +127,16 @@ func update(player_pos: Vector3, delta: float, night: bool = false) -> void:
 		# spawner. Rolled rather than forced so the walk into a village fills in over a
 		# few seconds instead of appearing all at once.
 		if _count_of("villager") < MAX_VILLAGERS and randf() < 0.5:
-			_try_spawn_villager(player_pos)
+			_try_spawn_at_village(player_pos, "villager")
+		# a village's guard is rolled much more rarely: a golem is a landmark, not a crowd
+		if _count_of("iron_golem") < MAX_GOLEMS and randf() < 0.08:
+			_try_spawn_at_village(player_pos, "iron_golem")
 		# wolves live in the woods, so they are rolled separately from the farm animals
 		if _count_of("wolf") < MAX_WOLVES and randf() < 0.35:
 			_try_spawn_wolf(player_pos)
+		# and a trader turns up on its own, rarely, wherever you happen to be standing
+		if _count_of("wandering_trader") < MAX_TRADERS and randf() < 0.04:
+			_try_spawn_trader(player_pos)
 
 
 ## The mobs of one species currently alive.
@@ -138,8 +150,13 @@ func _count_of(kind: String) -> int:
 
 ## Villagers appear around the nearest village centre, not around the player: a village
 ## is the only place they make sense, and spawning them on the ring the animals use
-## would scatter shopkeepers across empty fields.
-func _try_spawn_villager(player_pos: Vector3) -> void:
+## would scatter shopkeepers across empty fields. The guard uses the same ring, because a
+## golem belongs to the village it is guarding just as much as the shopkeepers do.
+func _try_spawn_at_village(player_pos: Vector3, kind: String) -> void:
+	# villages are an overworld thing: the nether has no villagers, and `nearest_village`
+	# would otherwise answer off the overworld's own noise and drop shopkeepers in the lava
+	if world.dimension == 1:
+		return
 	if world.terrain == null or not world.terrain.has_method("nearest_village"):
 		return
 	var v = world.terrain.nearest_village(floori(player_pos.x), floori(player_pos.z),
@@ -157,7 +174,29 @@ func _try_spawn_villager(player_pos: Vector3) -> void:
 		var gz := floori(spot.z)
 		if world.get_block(gx, gy, gz) != Blocks.AIR or not world.is_solid(gx, gy - 1, gz):
 			continue
-		spawn_at("villager", spot)
+		spawn_at(kind, spot)
+		return
+
+
+## A trader turns up near the player rather than in a village, on grass like the animals --
+## but it is deliberately not in their roster, so the ordinary farm roll never produces one.
+func _try_spawn_trader(player_pos: Vector3) -> void:
+	for attempt in 8:
+		var ang := randf() * TAU
+		var dist := randf_range(SPAWN_MIN, SPAWN_MAX)
+		var x := floori(player_pos.x + cos(ang) * dist)
+		var z := floori(player_pos.z + sin(ang) * dist)
+		if not world.chunks.has(Vector2i(x >> 4, z >> 4)):
+			continue
+		var spot: Vector3 = world.safe_spawn_near(Vector3(float(x) + 0.5, 0, float(z) + 0.5))
+		var gx := floori(spot.x)
+		var gy := floori(spot.y)
+		var gz := floori(spot.z)
+		if world.get_block(gx, gy, gz) != Blocks.AIR:
+			continue
+		if world.get_block(gx, gy - 1, gz) != Blocks.GRASS:
+			continue
+		spawn_at("wandering_trader", spot)
 		return
 
 

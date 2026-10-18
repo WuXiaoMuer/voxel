@@ -100,6 +100,8 @@ func _build() -> void:
 		Blocks.ITEM_CHICKEN_RAW: Blocks.ITEM_CHICKEN_COOKED,
 		Blocks.ITEM_POTATO: Blocks.ITEM_BAKED_POTATO,
 		Blocks.ITEM_FISH_RAW: Blocks.ITEM_FISH_COOKED,
+		# netherrack fires into a nether brick, the way clay fires into a brick
+		Blocks.NETHERRACK: Blocks.ITEM_NETHER_BRICK,
 	}
 	FUEL = {
 		Blocks.ITEM_COAL: 80.0,
@@ -120,6 +122,8 @@ func _build() -> void:
 		Blocks.GOLD_ORE: [PICK, 2], Blocks.DIAMOND_ORE: [PICK, 2],
 		Blocks.GOLD_BLOCK: [PICK, 2], Blocks.DIAMOND_BLOCK: [PICK, 2],
 		Blocks.OBSIDIAN: [PICK, 3],
+		# the nether's ore needs a pickaxe, tier 0 or better: it is stone-hard rock
+		Blocks.NETHER_QUARTZ_ORE: [PICK, 0],
 	}
 	TOOL_FOR = {
 		Blocks.STONE: PICK, Blocks.COBBLESTONE: PICK, Blocks.STONE_BRICK: PICK,
@@ -128,6 +132,7 @@ func _build() -> void:
 		Blocks.DIAMOND_ORE: PICK, Blocks.COAL_ORE: PICK, Blocks.COPPER_ORE: PICK,
 		Blocks.IRON_BLOCK: PICK, Blocks.GOLD_BLOCK: PICK, Blocks.DIAMOND_BLOCK: PICK,
 		Blocks.OBSIDIAN: PICK, Blocks.ICE: PICK,
+		Blocks.NETHER_QUARTZ_ORE: PICK, Blocks.NETHERRACK: PICK,
 		Blocks.LOG: AXE, Blocks.PLANKS: AXE, Blocks.CRAFTING_TABLE: AXE,
 		Blocks.CHEST: AXE, Blocks.DOOR: AXE, Blocks.DOOR_OPEN: AXE,
 		Blocks.FENCE: AXE, Blocks.LADDER: AXE,

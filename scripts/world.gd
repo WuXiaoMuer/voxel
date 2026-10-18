@@ -185,6 +185,19 @@ func new_buf() -> Buf:
 
 var seed_value := 12345
 var terrain: VoxelTerrain
+## Which dimension is being streamed. 0 is the overworld, 1 the nether. Only the active
+## dimension's blocks are live; the other is held whole in `_dim_store` until it is
+## switched back to, which is what lets a chest built in one still be there when you return.
+var dimension := 0
+## One generator per dimension, both built from the same seed and both kept, so switching
+## back and forth never rebuilds (and never loses) the noise fields that hold the seed.
+var terrain_over: VoxelTerrain
+var terrain_nether: VoxelTerrain
+## dim -> {chunks, edits, edits_by_chunk, torches, tile_override, facing_override,
+## circuit_lit, fluid, fluid_queue, fluid_timer, sign_text}. The dictionaries inside are
+## *references* to the ones the rest of the file uses, so a swap is a handful of pointer
+## assignments rather than a copy of the world.
+var _dim_store: Dictionary = {}
 var render_distance := 6
 var ao_enabled := true
 var ao_strength := 0.34
@@ -342,7 +355,11 @@ func setup(s: int, distance: int) -> void:
 	seed_value = s
 	perf_on = OS.get_cmdline_user_args().has("--perf")
 	perf_phase.clear()
-	terrain = VoxelTerrain.new(s)
+	terrain_over = VoxelTerrain.new(s, 0)
+	terrain_nether = VoxelTerrain.new(s, 1)
+	terrain = terrain_over
+	dimension = 0
+	_dim_store = {}
 	perf_gen_us = 0
 	perf_gen_max = 0
 	perf_gen_chunks = 0
@@ -418,6 +435,101 @@ func reset() -> void:
 	_gen_list = []
 	_gen_index = 0
 	_loading = true
+	# back to the overworld: a world that is reset has no dimensions stored, and the next
+	# `setup` builds both generators again
+	dimension = 0
+	terrain = terrain_over
+	_dim_store = {}
+
+
+## Swaps the live block state for another dimension's. The state that has to travel with it
+## is everything keyed by a block position -- the chunks, the edits, the magic that is not
+## derivable from a block id (facings, fluid levels, sign words), the light and circuit
+## caches -- because a chest at (0, 64, 0) in the nether and one at the same spot in the
+## overworld are different chests, and a wire in one must not reach across into the other.
+##
+## The stored dictionaries are the *same objects* the live names point at while a dimension
+## is active, so this is a swap of references, not a save and a reload.
+func set_dimension(d: int) -> void:
+	if d == dimension:
+		return
+	# Any in-flight work belongs to the dimension being left. Wait for it so no worker
+	# writes into a chunk record that is about to be stowed, then drop the queues.
+	for j in _jobs.values():
+		WorkerThreadPool.wait_for_task_completion(j)
+	_jobs.clear()
+	for j in _gen_jobs.values():
+		WorkerThreadPool.wait_for_task_completion(j)
+	_gen_jobs.clear()
+	_mutex.lock()
+	_results.clear()
+	_gen_results.clear()
+	_mutex.unlock()
+	_gen_pool.clear()
+	_stow_dimension(dimension)
+	dimension = d
+	terrain = terrain_nether if d == 1 else terrain_over
+	_adopt_dimension(d)
+	_center = Vector2i(99999, 99999)
+	_gen_pending = true
+	_loading = true
+	if circuit != null:
+		circuit.set_dimension(d)
+
+
+## Frees the meshes of the dimension being left -- the nodes are children of this world and
+## can only belong to one dimension at a time -- and stores its data dictionaries whole.
+func _stow_dimension(d: int) -> void:
+	for c in chunks.keys():
+		_free_nodes(chunks[c])
+		chunks[c]["nodes"] = {}
+		# on return every section has to be meshed again: the nodes were just freed, and the
+		# chunk record has no way of knowing the meshes are gone
+		chunks[c]["meshed"] = false
+		chunks[c]["dirty"] = _all_sections(chunks[c]["sections"])
+	for lb in _sign_labels.values():
+		if is_instance_valid(lb):
+			lb.queue_free()
+	_sign_labels.clear()
+	_dim_store[d] = {
+		"chunks": chunks, "edits": edits, "edits_by_chunk": edits_by_chunk,
+		"torches": torches, "tile_override": tile_override,
+		"facing_override": facing_override, "circuit_lit": circuit_lit,
+		"fluid": fluid, "fluid_queue": _fluid_queue, "fluid_timer": _fluid_timer,
+		"sign_text": sign_text,
+	}
+
+
+## Points the live names at a dimension's stored dictionaries, or at fresh empty ones the
+## first time that dimension is entered.
+func _adopt_dimension(d: int) -> void:
+	var s = _dim_store.get(d)
+	if s == null:
+		chunks = {}
+		edits = {}
+		edits_by_chunk = {}
+		torches = {}
+		tile_override = {}
+		facing_override = {}
+		circuit_lit = {}
+		fluid = {}
+		_fluid_queue = {}
+		_fluid_timer = 0.0
+		sign_text = {}
+		_sign_labels = {}
+		return
+	chunks = s["chunks"]
+	edits = s["edits"]
+	edits_by_chunk = s["edits_by_chunk"]
+	torches = s["torches"]
+	tile_override = s["tile_override"]
+	facing_override = s["facing_override"]
+	circuit_lit = s["circuit_lit"]
+	fluid = s["fluid"]
+	_fluid_queue = s["fluid_queue"]
+	_fluid_timer = float(s["fluid_timer"])
+	sign_text = s["sign_text"]
+	_sign_labels = {}
 
 
 func _exit_tree() -> void:
@@ -697,6 +809,10 @@ signal sign_opened(pos: Vector3i)
 signal bed_used(pos: Vector3i)
 ## Emitted when an enchanting table is right-clicked.
 signal enchant_opened(pos: Vector3i)
+## Emitted when an anvil is right-clicked, so main can repair the held tool.
+signal anvil_used(pos: Vector3i)
+## Emitted when a brewing stand is right-clicked, so main can brew the held reagent.
+signal brew_used(pos: Vector3i)
 
 var authority = null
 var containers = null       # the chest/furnace store, injected by main
@@ -766,6 +882,12 @@ func interact_block(pos: Vector3i, id: int) -> bool:
 			return true
 		Blocks.ENCHANTING_TABLE:
 			enchant_opened.emit(pos)
+			return true
+		Blocks.ANVIL:
+			anvil_used.emit(pos)
+			return true
+		Blocks.BREWING_STAND:
+			brew_used.emit(pos)
 			return true
 	if circuit != null:
 		return circuit.interact(pos, id)
@@ -1218,7 +1340,7 @@ func _submit_gen_jobs() -> void:
 ## dwarfs the cost of building one anyway.
 func _take_gen() -> VoxelTerrain:
 	if _gen_pool.is_empty():
-		return VoxelTerrain.new(seed_value)
+		return VoxelTerrain.new(seed_value, dimension)
 	return _gen_pool.pop_back()
 
 
@@ -2329,7 +2451,21 @@ func _update_lights(player_pos: Vector3) -> void:
 ## world ceiling, which is 320 now -- rescuing to there would drop the player for
 ## nearly three hundred blocks, which no survival player survives.
 func rescue_y(x: int, z: int) -> float:
-	return maxf(float(highest_occluder(x, z)) + 2.0, float(VoxelTerrain.SEA) + 8.0)
+	return maxf(float(_stand_top(x, z)) + 2.0, float(VoxelTerrain.SEA) + 8.0)
+
+
+## The highest y a "where can I stand" search should look down from.
+##
+## The heightmap is the topmost occluding cell of a column, which in the overworld is the
+## ground. In the nether it is the bedrock *roof*: its own top is a flat, standable ledge
+## with open sky over it, so every search that started there happily put the player on the
+## roof, outside the world. Capping it at the roof's underside keeps the searches inside the
+## cavern, which is the only place the nether has to stand on.
+func _stand_top(x: int, z: int) -> int:
+	var top := highest_occluder(x, z)
+	if dimension == 1:
+		return mini(top, VoxelTerrain.NETHER_TOP)
+	return top
 
 
 ## Resolves a standable spot near `pos` against the actual generated blocks: solid
@@ -2345,7 +2481,7 @@ func safe_spawn_near(pos: Vector3) -> Vector3:
 			var ang := TAU * float(a) / float(steps)
 			var x := bx + int(round(cos(ang) * float(radius)))
 			var z := bz + int(round(sin(ang) * float(radius)))
-			var top := mini(highest_occluder(x, z), MAX_Y - 4)
+			var top := mini(_stand_top(x, z), MAX_Y - 4)
 			for y in range(top, 1, -1):
 				var below := get_block(x, y - 1, z)
 				if Blocks.solid[below] == 0:
@@ -2360,30 +2496,238 @@ func safe_spawn_near(pos: Vector3) -> Vector3:
 	return pos
 
 
+# ================================================================ nether portals
+## One component of a cell along axis 0/1/2. Vector3i has no subscript in GDScript, so the
+## axis-generic frame checks below go through here.
+func _comp(v: Vector3i, a: int) -> int:
+	if a == 0:
+		return v.x
+	if a == 1:
+		return v.y
+	return v.z
+
+
+## Lights a portal from a cell inside a candidate doorway. `seed` is the open cell the
+## flint and steel was used on; the open space around it is flooded, checked against the
+## frame rules (a flat, rectangular slab of air one cell thick, at least 2 wide and 3 tall,
+## ringed by obsidian) and, if it passes, filled with the portal block.
+##
+## Flooding the air rather than reading the eight blocks around the click is what makes an
+## arbitrarily-shaped hand-built frame work: the open space is the doorway, whatever shape
+## the player built the obsidian in, as long as it is a rectangle.
+##
+## A doorway is a *plane*, so the flood has to be kept in one. Trying both planes in turn --
+## an x-facing one and a z-facing one, the only two a portal can lie in -- is what lets the
+## same click light a doorway on a wall and one standing in the open, rather than leaking
+## out through whichever side happens to be open air.
+func ignite_portal(seed: Vector3i) -> bool:
+	if get_block(seed.x, seed.y, seed.z) != Blocks.AIR:
+		return false
+	for n in [Vector3i(1, 0, 0), Vector3i(0, 0, 1)]:
+		var region: Dictionary = _portal_region(seed, n)
+		if region.is_empty():
+			continue
+		for k in region.keys():
+			var p3: Vector3i = k
+			apply_edit(p3, Blocks.NETHER_PORTAL, true)
+		return true
+	return false
+
+
+## The open cells of the doorway lying in the plane whose normal is `n`, or {} when the
+## space around `seed` is not such a doorway (it leaks, it is the wrong shape, or its ring is
+## not obsidian). The flood only moves within the plane, so the far side of an open doorway
+## is never reached and the space is measured for width and height alone.
+func _portal_region(seed: Vector3i, n: Vector3i) -> Dictionary:
+	var norm_axis := 0 if n.x != 0 else (2 if n.z != 0 else 1)
+	var off: Array = [Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, 0, 1)]
+	var axes: Array = []
+	for ai in [0, 1, 2]:
+		if ai != norm_axis:
+			axes.append(off[ai])
+			axes.append(off[ai] * -1)
+	var region: Dictionary = {seed: true}
+	var lo := seed
+	var hi := seed
+	var stack: Array = [seed]
+	var cap := 21 * 21
+	while not stack.is_empty():
+		var p: Vector3i = stack.pop_back()
+		for d in axes:
+			var q: Vector3i = p + d
+			if region.has(q):
+				continue
+			var id := get_block(q.x, q.y, q.z)
+			if id == Blocks.AIR:
+				region[q] = true
+				stack.append(q)
+				lo = Vector3i(mini(lo.x, q.x), mini(lo.y, q.y), mini(lo.z, q.z))
+				hi = Vector3i(maxi(hi.x, q.x), maxi(hi.y, q.y), maxi(hi.z, q.z))
+				if region.size() > cap:
+					return {}
+			elif id != Blocks.OBSIDIAN and id != Blocks.NETHER_PORTAL:
+				# neither frame nor open space: not a clean doorway
+				return {}
+	var ext := Vector3i(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z)
+	# the two in-plane widths: one is the doorway's width, the other its height
+	var e1r := 0
+	var e2r := 0
+	var got := 0
+	for ai2 in [0, 1, 2]:
+		if ai2 == norm_axis:
+			continue
+		if got == 0:
+			e1r = _comp(ext, ai2)
+		else:
+			e2r = _comp(ext, ai2)
+		got += 1
+	# 2 wide by 3 tall at the smallest, 21 by 21 at the largest
+	if mini(e1r, e2r) < 1 or maxi(e1r, e2r) < 2 or maxi(e1r, e2r) > 20:
+		return {}
+	# the ring: every edge of the doorway has to look out on obsidian
+	for k in region.keys():
+		var p2: Vector3i = k
+		for ai3 in [0, 1, 2]:
+			if ai3 == norm_axis:
+				continue
+			var o: Vector3i = off[ai3]
+			if _comp(p2, ai3) == _comp(lo, ai3):
+				var q1: Vector3i = p2 - o
+				if get_block(q1.x, q1.y, q1.z) != Blocks.OBSIDIAN:
+					return {}
+			if _comp(p2, ai3) == _comp(hi, ai3):
+				var q2: Vector3i = p2 + o
+				if get_block(q2.x, q2.y, q2.z) != Blocks.OBSIDIAN:
+					return {}
+	return region
+
+
+## The nearest portal block to a point, or a far-off sentinel when there is none within
+## `radius`. Only the dimension's own edits are around to be read, which is exactly right:
+## a portal in the overworld must not answer for one in the nether.
+func find_portal_near(x: int, y: int, z: int, radius: int) -> Vector3i:
+	var best := Vector3i(1 << 24, 1 << 24, 1 << 24)
+	var best_d := radius * radius
+	for pos in edits.keys():
+		if int(edits[pos]) != Blocks.NETHER_PORTAL:
+			continue
+		var dx: int = pos.x - x
+		var dy: int = pos.y - y
+		var dz: int = pos.z - z
+		var d := dx * dx + dy * dy + dz * dz
+		if d <= best_d:
+			best_d = d
+			best = pos
+	return best
+
+
+## The first standable y in a column: solid ground below and three cells of headroom. The
+## cell the portal's obsidian base sits on, so a built portal stands on real ground rather
+## than floating or buried. -1 when the column has no such spot.
+func portal_ground(x: int, z: int) -> int:
+	var top := mini(_stand_top(x, z), MAX_Y - 6)
+	for y in range(top, MIN_Y + 2, -1):
+		if Blocks.solid[get_block(x, y - 1, z)] != 1:
+			continue
+		var clear := true
+		for dy in 3:
+			if Blocks.solid[get_block(x, y + dy, z)] == 1:
+				clear = false
+				break
+		if clear:
+			return y
+	return -1
+
+
+## Builds a lit portal at `base` (the bottom-left interior cell), its doorway lying in the
+## x/y plane one cell thick in z. The frame is written as real edits, so it survives a save
+## and a reload the way any other built block does.
+func build_portal_at(base: Vector3i) -> bool:
+	var x0 := base.x
+	var y0 := base.y
+	var z := base.z
+	for dx in range(-1, 3):
+		for dy in range(-1, 4):
+			if dx == -1 or dx == 2 or dy == -1 or dy == 3:
+				set_block(x0 + dx, y0 + dy, z, Blocks.OBSIDIAN, true)
+	for dx2 in range(0, 2):
+		for dy2 in range(0, 3):
+			set_block(x0 + dx2, y0 + dy2, z, Blocks.AIR, false)
+	for dx3 in range(0, 2):
+		for dy3 in range(0, 3):
+			set_block(x0 + dx3, y0 + dy3, z, Blocks.NETHER_PORTAL, true)
+	return true
+
+
 # ================================================================ persistence
 func edit_count() -> int:
 	return edits.size()
 
 
+## The stored data of one dimension, as the same dictionary of dictionaries the live names
+## are drawn from. For the active dimension it is assembled from those live names, so the
+## dictionaries inside are the live ones; for a stored dimension it is its record in
+## `_dim_store`. Either way a write through the result reaches the dimension it names.
+func _dim_view(d: int) -> Dictionary:
+	if d == dimension:
+		return {"chunks": chunks, "edits": edits, "edits_by_chunk": edits_by_chunk,
+			"torches": torches, "tile_override": tile_override,
+			"facing_override": facing_override, "circuit_lit": circuit_lit,
+			"fluid": fluid, "fluid_queue": _fluid_queue, "fluid_timer": _fluid_timer,
+			"sign_text": sign_text}
+	# a dimension that has never been entered still has to be able to be written to, or a
+	# save made from the overworld would have no nether to put its edits in
+	_ensure_dim(d)
+	var s: Dictionary = _dim_store.get(d, {})
+	return s
+
+
+## Makes sure a dimension has a store to be loaded into, so loading a nether save before the
+## nether has ever been entered writes into something that survives until it is.
+func _ensure_dim(d: int) -> void:
+	if d == dimension or _dim_store.has(d):
+		return
+	_dim_store[d] = {"chunks": {}, "edits": {}, "edits_by_chunk": {}, "torches": {},
+		"tile_override": {}, "facing_override": {}, "circuit_lit": {},
+		"fluid": {}, "fluid_queue": {}, "fluid_timer": 0.0, "sign_text": {}}
+
+
 func serialize_edits() -> PackedByteArray:
+	return _edits_bytes(edits)
+
+
+func serialize_edits_dim(d: int) -> PackedByteArray:
+	return _edits_bytes(_dim_view(d)["edits"])
+
+
+func _edits_bytes(e: Dictionary) -> PackedByteArray:
 	var buf := PackedByteArray()
-	var n := edits.size()
+	var n := e.size()
 	buf.resize(4 + n * 13)
 	buf.encode_s32(0, n)
 	var i := 0
-	for pos in edits.keys():
+	for pos in e.keys():
 		var off := 4 + i * 13
 		buf.encode_s32(off, pos.x)
 		buf.encode_s32(off + 4, pos.y)
 		buf.encode_s32(off + 8, pos.z)
-		buf.encode_u8(off + 12, edits[pos])
+		buf.encode_u8(off + 12, e[pos])
 		i += 1
 	return buf
 
 
 func load_edits(buf: PackedByteArray) -> void:
+	load_edits_dim(dimension, buf)
+
+
+func load_edits_dim(d: int, buf: PackedByteArray) -> void:
 	if buf.size() < 4:
 		return
+	_ensure_dim(d)
+	var v := _dim_view(d)
+	var e: Dictionary = v["edits"]
+	var ebc_all: Dictionary = v["edits_by_chunk"]
+	var tr: Dictionary = v["torches"]
 	var n := buf.decode_s32(0)
 	for i in n:
 		var off := 4 + i * 13
@@ -2391,29 +2735,37 @@ func load_edits(buf: PackedByteArray) -> void:
 			break
 		var pos := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
 		var id := buf.decode_u8(off + 12)
-		edits[pos] = id
+		e[pos] = id
 		if Blocks.emission[id] > 0:
-			torches[pos] = id
+			tr[pos] = id
 		var c := Vector2i(pos.x >> 4, pos.z >> 4)
-		var ebc: Dictionary = edits_by_chunk.get(c, {})
+		var ebc: Dictionary = ebc_all.get(c, {})
 		ebc[pos] = id
-		edits_by_chunk[c] = ebc
+		ebc_all[c] = ebc
 
 
 ## Which way each thin panel faces is not derivable from the block ids, so it gets its
 ## own small file, the way circuit state does. 16 bytes an entry: pos + a signed direction.
 func serialize_facing() -> PackedByteArray:
+	return _facing_bytes(facing_override)
+
+
+func serialize_facing_dim(d: int) -> PackedByteArray:
+	return _facing_bytes(_dim_view(d)["facing_override"])
+
+
+func _facing_bytes(fo: Dictionary) -> PackedByteArray:
 	var buf := PackedByteArray()
-	var n := facing_override.size()
+	var n := fo.size()
 	buf.resize(4 + n * 16)
 	buf.encode_s32(0, n)
 	var i := 0
-	for pos in facing_override.keys():
+	for pos in fo.keys():
 		var off := 4 + i * 16
 		buf.encode_s32(off, pos.x)
 		buf.encode_s32(off + 4, pos.y)
 		buf.encode_s32(off + 8, pos.z)
-		var f: Vector3i = facing_override[pos]
+		var f: Vector3i = fo[pos]
 		buf.encode_s8(off + 12, f.x)
 		buf.encode_s8(off + 13, f.y)
 		buf.encode_s8(off + 14, f.z)
@@ -2422,15 +2774,21 @@ func serialize_facing() -> PackedByteArray:
 
 
 func load_facing(buf: PackedByteArray) -> void:
+	load_facing_dim(dimension, buf)
+
+
+func load_facing_dim(d: int, buf: PackedByteArray) -> void:
 	if buf.size() < 4:
 		return
+	_ensure_dim(d)
+	var fo: Dictionary = _dim_view(d)["facing_override"]
 	var n := buf.decode_s32(0)
 	for i in n:
 		var off := 4 + i * 16
 		if off + 16 > buf.size():
 			break
 		var pos := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
-		facing_override[pos] = Vector3i(buf.decode_s8(off + 12), buf.decode_s8(off + 13),
+		fo[pos] = Vector3i(buf.decode_s8(off + 12), buf.decode_s8(off + 13),
 			buf.decode_s8(off + 14))
 
 
@@ -2439,17 +2797,25 @@ func load_facing(buf: PackedByteArray) -> void:
 ## of text. The text is clipped to 16 characters first, so a multi-byte line is never cut
 ## in the middle of a character.
 func serialize_signs() -> PackedByteArray:
+	return _signs_bytes(sign_text)
+
+
+func serialize_signs_dim(d: int) -> PackedByteArray:
+	return _signs_bytes(_dim_view(d)["sign_text"])
+
+
+func _signs_bytes(st: Dictionary) -> PackedByteArray:
 	var buf := PackedByteArray()
-	var n := sign_text.size()
+	var n := st.size()
 	buf.resize(4 + n * 77)
 	buf.encode_s32(0, n)
 	var i := 0
-	for pos in sign_text.keys():
+	for pos in st.keys():
 		var off := 4 + i * 77
 		buf.encode_s32(off, pos.x)
 		buf.encode_s32(off + 4, pos.y)
 		buf.encode_s32(off + 8, pos.z)
-		var b := str(sign_text[pos]).substr(0, 16).to_utf8_buffer()
+		var b := str(st[pos]).substr(0, 16).to_utf8_buffer()
 		var ln := mini(b.size(), 64)
 		buf.encode_u8(off + 12, ln)
 		for k in ln:
@@ -2459,8 +2825,14 @@ func serialize_signs() -> PackedByteArray:
 
 
 func load_signs(buf: PackedByteArray) -> void:
+	load_signs_dim(dimension, buf)
+
+
+func load_signs_dim(d: int, buf: PackedByteArray) -> void:
 	if buf.size() < 4:
 		return
+	_ensure_dim(d)
+	var st: Dictionary = _dim_view(d)["sign_text"]
 	var n := buf.decode_s32(0)
 	for i in n:
 		var off := 4 + i * 77
@@ -2471,36 +2843,52 @@ func load_signs(buf: PackedByteArray) -> void:
 		var raw := PackedByteArray()
 		for k in ln:
 			raw.append(buf.decode_u8(off + 13 + k))
-		sign_text[pos] = raw.get_string_from_utf8()
+		st[pos] = raw.get_string_from_utf8()
 
 
 ## A flowing fluid cell and a source hold the same block id, so the levels cannot be
 ## recovered from the blocks and get their own file, the way facings do. 13 bytes each.
 func serialize_fluid() -> PackedByteArray:
+	return _fluid_bytes(fluid)
+
+
+func serialize_fluid_dim(d: int) -> PackedByteArray:
+	return _fluid_bytes(_dim_view(d)["fluid"])
+
+
+func _fluid_bytes(fl: Dictionary) -> PackedByteArray:
 	var buf := PackedByteArray()
-	var n := fluid.size()
+	var n := fl.size()
 	buf.resize(4 + n * 13)
 	buf.encode_s32(0, n)
 	var i := 0
-	for pos in fluid.keys():
+	for pos in fl.keys():
 		var off := 4 + i * 13
 		buf.encode_s32(off, pos.x)
 		buf.encode_s32(off + 4, pos.y)
 		buf.encode_s32(off + 8, pos.z)
-		buf.encode_u8(off + 12, int(fluid[pos]))
+		buf.encode_u8(off + 12, int(fl[pos]))
 		i += 1
 	return buf
 
 
 func load_fluid(buf: PackedByteArray) -> void:
+	load_fluid_dim(dimension, buf)
+
+
+func load_fluid_dim(d: int, buf: PackedByteArray) -> void:
 	if buf.size() < 4:
 		return
+	_ensure_dim(d)
+	var v := _dim_view(d)
+	var fl: Dictionary = v["fluid"]
+	var fq: Dictionary = v["fluid_queue"]
 	var n := buf.decode_s32(0)
 	for i in n:
 		var off := 4 + i * 13
 		if off + 13 > buf.size():
 			break
 		var pos := Vector3i(buf.decode_s32(off), buf.decode_s32(off + 4), buf.decode_s32(off + 8))
-		fluid[pos] = buf.decode_u8(off + 12)
+		fl[pos] = buf.decode_u8(off + 12)
 		# queued so the sim re-settles a body of water that was flowing when it was saved
-		_fluid_queue[pos] = true
+		fq[pos] = true

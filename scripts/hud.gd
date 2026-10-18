@@ -1335,12 +1335,21 @@ func _palette_ids(cat: int) -> Array:
 					blocks.append(i)
 			return blocks
 		2:  # items
-			return [Blocks.ITEM_STICK, Blocks.ITEM_COAL, Blocks.ITEM_IRON, Blocks.ITEM_GOLD,
-				Blocks.ITEM_DIAMOND, Blocks.ITEM_COPPER, Blocks.ITEM_SEEDS, Blocks.ITEM_WHEAT,
-				Blocks.ITEM_STRING, Blocks.ITEM_GUNPOWDER, Blocks.ITEM_LEATHER,
-				Blocks.ITEM_BONE, Blocks.ITEM_ARROW, Blocks.ITEM_FEATHER, Blocks.ITEM_SLIME_BALL,
-				Blocks.ITEM_ENDER_PEARL, Blocks.ITEM_EMERALD, Blocks.ITEM_BUCKET,
-				Blocks.ITEM_WATER_BUCKET, Blocks.ITEM_LAVA_BUCKET]
+			# Derived rather than hand-kept: every pure item that is not already in the
+			# tools, food or dye tab. A hand-kept list had gone stale -- flint and steel,
+			# the bow, the fishing rod, shears, the cart and the boat, every potion, and
+			# now the nether's quartz and brick were all placeable in none of the tabs,
+			# so a creative player could not get them at all.
+			var taken: Dictionary = {}
+			for other in [3, 4, 5]:
+				for id2 in _palette_ids(other):
+					taken[int(id2)] = true
+			var pure: Array = []
+			for i in range(256, 512):
+				if Blocks.defs[i] != null or Blocks.display_name(i) == "?" or taken.has(i):
+					continue
+				pure.append(i)
+			return pure
 		3:  # tools and armour
 			return [Blocks.ITEM_WOOD_PICK, Blocks.ITEM_WOOD_AXE, Blocks.ITEM_WOOD_SHOVEL,
 				Blocks.ITEM_WOOD_SWORD, Blocks.ITEM_WOOD_HOE,
