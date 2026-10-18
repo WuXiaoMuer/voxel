@@ -302,6 +302,15 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') || inputs.publish)
     runs-on: ubuntu-latest
     steps:
+      # gh resolves the repository from the git remote, so this job needs a checkout even
+      # though it builds nothing -- and with the tags fetched, the generated notes can be
+      # diffed against the previous release. It has to come *before* the artifacts are
+      # unpacked: a checkout cleans untracked files, and dist/ is untracked.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -310,6 +319,7 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
