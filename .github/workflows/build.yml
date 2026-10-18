@@ -1,10 +1,12 @@
 name: Build
 
-# Builds a package for every platform VoxelCraft ships on, and -- when the run was started
-# by a version tag -- publishes them all as one GitHub Release.
+# Builds a package for every platform VoxelCraft ships on and publishes them as one GitHub
+# Release. The release is automatic: a build that succeeds always publishes, so there is no
+# second, forgettable step.
 #
-#   git tag v1.0.0 && git push origin v1.0.0      -> build every package, then release
-#   Actions tab -> Build -> Run workflow          -> build only, as downloadable artifacts
+#   git tag v1.0.3 && git push origin v1.0.3   -> release under the tag that was pushed
+#   Actions tab -> Build -> Run workflow       -> release the next patch version
+#   the same, with "publish" turned off        -> build only, as downloadable artifacts
 #
 # Godot is not vendored: every job downloads the 4.5.x engine build and the matching export
 # templates, and both are cached, so only the first run pays for the ~1 GB download.
@@ -13,6 +15,15 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a GitHub Release once every package has built"
+        type: boolean
+        default: true
+      version:
+        description: "Version to release, e.g. 1.0.3. Empty = the next patch after the highest v* tag."
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -21,9 +32,74 @@ env:
   GODOT_VERSION: "4.5.1"
 
 jobs:
+  # Resolved once, up front: the packages are named after the version and the release is
+  # published under it, so the one thing the build and the release have to agree on is which
+  # version this run is.
+  version:
+    name: Work out the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}   # 1.0.3 -- what the files are named after
+      tag: ${{ steps.pick.outputs.tag }}           # v1.0.3 -- what the release is published under
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the next version is derived from the tags, and a shallow checkout has none
+          fetch-depth: 0
+          fetch-tags: true
+
+      - id: pick
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # a pushed tag names the release outright; otherwise the version typed into a
+          # manual run; and failing both, the next patch after the highest version tag --
+          # so that a build always has a version to publish under
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#refs/tags/}"
+          elif [ -n "${REQUESTED:-}" ]; then
+            # ${REQUESTED:-}: the input is empty on a tag push, and for a manual run that
+            # leaves the version blank -- and `set -u` would abort on an unset name
+            TAG="${REQUESTED:-}"
+            case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+            # refuse a version that is already taken rather than quietly attaching the
+            # release to whatever old commit that tag happens to point at -- and refusing
+            # here costs ten seconds, before any of the expensive builds have started
+            if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+              echo "::error::$TAG already exists. Pick a free version, or push that tag onto the commit you want it on."
+              exit 1
+            fi
+          else
+            LAST=$(git tag --list 'v*' --sort=-v:refname \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+            if [ -z "$LAST" ]; then
+              MAJ=1; MIN=0; PAT=0
+            else
+              BASE="${LAST#v}"
+              MAJ="${BASE%%.*}"
+              REST="${BASE#*.}"
+              MIN="${REST%%.*}"
+              PAT="${REST#*.}"
+              PAT=$((PAT + 1))
+            fi
+            # never reuse a version that is already taken, even one pointing at an old commit
+            while git rev-parse -q --verify "refs/tags/v${MAJ}.${MIN}.${PAT}" > /dev/null; do
+              PAT=$((PAT + 1))
+            done
+            TAG="v${MAJ}.${MIN}.${PAT}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "this run releases ${TAG}"
+
   export:
     name: ${{ matrix.name }}
+    needs: version
     runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     strategy:
       # one platform breaking must not cancel the others: a release with four packages out
       # of five is still a useful release, and the failing job's log is what fixes the fifth
@@ -93,13 +169,6 @@ jobs:
           chmod +x "$BIN"
           echo "GODOT_BIN=$BIN" >> "$GITHUB_ENV"
           "$BIN" --version
-
-      - name: Work out the version
-        shell: bash
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then V="${GITHUB_REF_NAME#v}"; else V="dev-${GITHUB_SHA::7}"; fi
-          echo "VERSION=$V" >> "$GITHUB_ENV"
-          echo "packaging VoxelCraft $V"
 
       # ---- Android's toolchain, which no other platform needs: a JDK, the SDK, and a
       # keystore to sign the APK with. Godot reads the SDK and JDK from ANDROID_HOME and
@@ -223,8 +292,14 @@ jobs:
 
   release:
     name: Publish the release
-    needs: export
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, export]
+    # every build that succeeds publishes, so a release is never a second step to remember:
+    # a pushed tag names it, and a run with no tag takes the next version. The one way out is
+    # turning "publish" off on a manual run, which is how a build is checked without cutting
+    # a version at all.
+    if: |
+      needs.export.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') || inputs.publish)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -235,13 +310,18 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
           ls -l dist
-          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* \
-              --title "VoxelCraft ${GITHUB_REF_NAME#v}" \
-              --generate-notes
+            # --target pins the tag to the commit that was built, rather than letting gh
+            # tag whatever the default branch happens to point at by the time this runs
+            gh release create "$TAG" dist/* \
+              --title "VoxelCraft $VERSION" \
+              --generate-notes \
+              --target "$GITHUB_SHA"
           fi

@@ -47,16 +47,20 @@ template is used, since that is all a release build needs.
 
 ## Releases
 
-Every tagged version is built and published by **GitHub Actions** (see
-[`.github/workflows/build.yml`](.github/workflows/build.yml)), so a release is one tag:
+Every build publishes a GitHub Release. The workflow
+([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds all the packages and
+then creates the release itself, so publishing is never a second step to remember. Push a
+tag and the release goes out under it:
 
 ```
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
-The workflow builds a package for each platform, in parallel, and attaches them all to a
-GitHub Release:
+Or run **Build** from the Actions tab with no tag at all: the version is then the next patch
+after the highest `v*` tag — with `v1.0.2` already released, the next run publishes `v1.0.3`.
+Either way the version is settled first, the packages are named after it and built in
+parallel, and they all land on the one release:
 
 | Platform | Package |
 | --- | --- |
@@ -67,9 +71,11 @@ GitHub Release:
 | Web | `VoxelCraft-<version>-web.zip` — serve it over HTTP and play in a browser |
 | Android | `VoxelCraft-<version>-android-arm64.apk` |
 
-Run the **Build** workflow by hand from the Actions tab to get the same five packages as
-downloadable artifacts **without** publishing anything — that is the way to test a build
-before tagging it.
+A manual run can name the version itself instead of taking the next one, and its **publish**
+switch can be turned off — that builds the packages and leaves them as downloadable
+artifacts without cutting a version, which is how a build is checked before it is released.
+A version that is already taken is refused up front, rather than quietly attaching the
+release to whatever old commit that tag happens to point at.
 
 Two caveats that come from building without an account anywhere: the macOS app is
 **unsigned**, so the first launch needs *right-click → Open*; and the Android APK is signed

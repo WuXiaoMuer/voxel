@@ -41,15 +41,18 @@
 
 ## 发布版本
 
-每个打上版本号的 tag 都会由 **GitHub Actions** 自动编译并发布（见
-[`.github/workflows/build.yml`](.github/workflows/build.yml)），所以发布一个版本只需要打一个 tag：
+每次构建都会发布一个 GitHub Release。工作流（[`.github/workflows/build.yml`](.github/workflows/build.yml)）
+会先编译好所有的包，再自己建 Release，所以「发布」从来不是第二个需要记着的步骤。推一个 tag，
+Release 就以它命名：
 
 ```
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
-工作流会并行地为每个平台编译一个包，并把它们全部附到一个 GitHub Release 上：
+或者在 Actions 页什么 tag 都不带、直接运行 **Build**：版本号会取当前最高的 `v*` tag 之后的
+下一个补丁号 —— 比如 `v1.0.2` 已经发布过，下一次运行就会发布 `v1.0.3`。两种方式都是先定下
+版本号，各平台的包按它命名、并行编译，最后全部挂到同一个 Release 上：
 
 | 平台 | 发布物 |
 | --- | --- |
@@ -60,8 +63,9 @@ git push origin v1.0.0
 | Web | `VoxelCraft-<版本>-web.zip` —— 用 HTTP 托管即可在浏览器里玩 |
 | Android | `VoxelCraft-<版本>-android-arm64.apk` |
 
-在 Actions 页手动运行 **Build** 工作流，可以拿到同样的五个包作为 artifact 下载，但
-**不会**发布任何东西 —— 打 tag 之前想验证一次编译，走这条路径。
+手动运行时也可以自己指定版本号（而不是取下一个补丁号），并且可以把 **publish** 关掉 —— 那样只编译
+各平台的包、作为 artifact 供下载，不产生任何版本，这是发布前先验证一次编译的路径。若指定的版本号
+已被占用，会在最开始就被拒绝，而不是悄悄地把 Release 挂到那个 tag 指向的旧提交上。
 
 有两个因为没有签名账号而必然存在的提醒：macOS 的 `.app` 是**未签名**的，首次打开需要
 *右键 → 打开*；Android 的 APK 用的是临时调试密钥签名，安装时需要允许*未知来源*。
