@@ -185,6 +185,7 @@ func _ready() -> void:
 		Blocks.NETHER_PORTAL: "A lit doorway between the overworld and the nether.",
 		Blocks.ITEM_NETHER_QUARTZ: "The quartz ore's drop. A pale crafting crystal.",
 		Blocks.ITEM_NETHER_BRICK: "Smelted from netherrack. Four press into a brick block.",
+		Blocks.ITEM_GOLD_NUGGET: "A small nugget of gold. Pigmen drop them.",
 	}
 
 
@@ -600,6 +601,11 @@ func _item_icon(id: int, size: int) -> Image:
 				_px(img, x, 12, k, Color(0.20, 0.12, 0.13))
 			for x in range(3, 13):
 				_px(img, x, 5, k, Color(0.38, 0.24, 0.25))
+		Blocks.ITEM_GOLD_NUGGET:
+			# a small, rounded nugget of gold
+			_blob_px(img, 8, 9, 3, k, Color(0.96, 0.82, 0.28))
+			_blob_px(img, 7, 8, 2, k, Color(1.0, 0.90, 0.46))
+			_px(img, 6, 11, k, Color(0.82, 0.64, 0.16))
 		_:
 			_blob_px(img, 8, 8, 4, k, Color(0.6, 0.6, 0.65))
 	return img

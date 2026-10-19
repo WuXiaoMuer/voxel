@@ -122,6 +122,30 @@ game stops rather than carrying on behind the menu. In fullscreen the desktop wi
 the cursor off the screen, so there the trigger is clicking another window or `Alt-Tab`;
 both are handled.
 
+## Touch controls
+
+On a phone or a tablet the game lays a set of on-screen controls over the view, so it is
+playable with no keyboard or mouse at all:
+
+| Control | Action |
+| --- | --- |
+| Left stick | Move — push it away from the middle to walk |
+| Drag anywhere else | Look |
+| **DIG** | Hold to mine the block under the crosshair |
+| **USE** | Place the selected block / use the held item |
+| **JUMP** / **SNEAK** | Jump (or fly up) / sneak (or fly down) |
+| **BAG** / **FLY** / **MENU** | Inventory / toggle flight (creative only) / pause |
+
+The controls appear by themselves on a device with a touchscreen, and nowhere else: on a
+desktop they are never drawn and the mouse and keyboard behave exactly as they always
+did. A desktop run can force them on with `--touch` on the command line, or with
+**Settings → Touch controls**; that switch is the only way to see them without a
+touchscreen. They only ever show while you are actually playing — opening the inventory,
+the progress screen, the chat or the pause menu puts them away again.
+
+The game asks for a landscape orientation, because a first-person view wants the wide
+screen; either way round of landscape is allowed.
+
 ## Gameplay
 
 **Two game modes**
@@ -268,7 +292,7 @@ whole, and the side you saved on is the side you load back into.
 
 **Advancements**
 
-Sixty milestones track how far you have come, in the spirit of Minecraft's
+Sixty-one milestones track how far you have come, in the spirit of Minecraft's
 advancements: break your first block, get wood, benchmark a crafting table, reach
 the Stone Age, smelt iron, find a diamond, trade with a villager, enchant a tool,
 draw your first copper wire. They are grouped into Getting Started, Mining, Building,
@@ -278,7 +302,7 @@ at the top of the screen with its icon, "Advancement Made!" and its name.
 Two of them are counted goals rather than a single event — break 100 blocks to become
 a Miner, place 200 to become an Architect — and two fire on a value rather than an
 event: reaching experience level 10 is *Experienced*. The full list, with what each
-one asks for and how many of the fifty-seven you have earned, is on the **Advancements**
+one asks for and how many of the sixty-one you have earned, is on the **Advancements**
 screen, opened from the pause menu; earned rows are lit and the rest are dimmed rather
 than hidden, so you can always see what there is left to aim for. Press `L` for it in
 game, or read the tally with `/progress` (and manage it with `/advancement grant|revoke`).
@@ -657,8 +681,25 @@ regenerates the same world from the host's seed and only block edits travel the 
 whole diff on join, one small event per edit after that). A client predicts its own edits
 so placing feels instant, then snaps to whatever the host confirms. Every edit already
 funnelled through the world-authority seam, so multiplayer is a subclass of it rather than
-a change to it. Remote avatars, host-authoritative mobs and drops, and a server-side
-command layer are the next steps, written up in [`MULTIPLAYER.md`](MULTIPLAYER.md) §8.
+a change to it.
+
+On top of the edits it also keeps the session together in the three ways that matter:
+
+* **dimensions stay in step** — when the host walks through a nether doorway the clients
+  follow through the same travel path, and a client that joins while the host is already in
+  the nether starts there;
+* **you can see everyone else** — each peer reports its position and facing about twenty
+  times a second, and the others draw it as a real `player_model.gd` body, freed the moment
+  that player leaves;
+* **mobs belong to the host** — only the host decides where a mob spawns and when it is hit
+  or killed, and those events are broadcast, so a client never rolls a monster of its own
+  and never decides a remote one's drop. A client's own swing cannot kill a mob the host has
+  not killed.
+
+What it does **not** do yet: a remote mob's *movement* is not streamed (it appears where it
+spawned and stands there), dropped items are not replicated, there is no server-side reach
+validation, no NAT traversal and no host migration. The rest is written up in
+[`MULTIPLAYER.md`](MULTIPLAYER.md) §6 and §8.
 
 The whole GUI is drawn from procedurally generated pixel textures, and the text uses
 a 5×7 pixel font that is compiled into a real `FontFile` at runtime.
@@ -678,7 +719,8 @@ scripts/
   sfx.gd                 autoload: synthesised sound effects + looping music
   commands.gd            autoload: command registry, permission levels, console
   advancements.gd        autoload: milestone definitions, earning rules, progress state
-  net.gd                 autoload: ENet transport, handshake, host/client authorities
+  net.gd                 autoload: ENet transport, handshake, dimension / pose / mob
+                         events, host/client authorities
   terrain.gd             worldgen: heightfield, biomes, caves, ore veins, trees
   world.gd               chunk streaming, meshing, light baking, edits, raycasting
   circuit.gd             the power solver: signal propagation and component state
@@ -704,7 +746,8 @@ export_presets.cfg       the export presets, one per platform (UTF-8, no BOM!)
 build_exe.bat            exports a self-contained build\VoxelCraft.exe
 run_game.bat             runs the project from source
 open_editor.bat          opens it in the Godot editor
-MULTIPLAYER.md           design document for netplay (host/join + edit sync implemented)
+MULTIPLAYER.md           design document for netplay (host/join, edits, dimensions,
+                         remote avatars and host-authoritative mobs implemented)
 build/                   export output; not part of the project, safe to delete
 ```
 
@@ -943,6 +986,19 @@ because an error there is invisible by eye on a 4-pixel limb:
   standing in the doorway and driven by the ordinary per-frame check until the world has
   actually changed dimension, streamed the nether's own chunks, and (through the arrival
   doorway) come back to the overworld.
+* **the multiplayer seams are checked, and single player is checked to be untouched**: the
+  suite drives the same handlers and signals the socket does — the dimension handler
+  (`Net._dimension`) is required to switch the world through the ordinary travel path and
+  back; a reported pose is required to build a visible `player_model.gd` body at the
+  reported spot and to release it, with no node left behind, when that player leaves; a
+  client is required to spawn **no** hostile of its own across four hundred night ticks; and
+  the host's *spawn* / *hit* / *death* events are required to build, flash and free a body
+  on the client, whose own swing is required not to be able to target one. Two checks pin
+  the single-player behaviour: the whole suite above is required to have run with no session
+  open, and with no session the spawner is required to stay open and a kill to still drop its
+  loot. The socket itself (the RPCs, the relay, the handshake carrying the host's dimension)
+  is covered by a separate two-process run — `--netserve` in one process and `--netjoin` in
+  another, over a real ENet socket on `localhost`.
 
 It also builds a **synthetic chunk of ocean** (seabed, water up to sea level, and a
 one-block sand bank) and runs the real chunk mesher over it, then swims the player

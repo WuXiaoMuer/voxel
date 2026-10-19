@@ -82,6 +82,26 @@ const TYPES := {
 		"body_col": "12121a", "head_col": "18181f", "leg_col": "0c0c12",
 		"arm_col": "18181f", "sound": "mob_low",
 	},
+	# ---- the nether's own hostiles. Neither of them is ever in the overworld's spawn
+	# roster, and both are `burn: false` because the sun never reaches down there. The
+	# pigman is the nether's melee brute -- a green hulk with a pig's snout -- and the
+	# blaze is its ranged one: a yellow, floating fire-spitter that lobs bolts like a
+	# skeleton looses arrows.
+	"pigman": {
+		"shape": "human", "hostile": true, "burn": false, "speed": 1.9,
+		"atk_dmg": 3.0, "atk_range": 1.7, "health": 20.0,
+		"body": [8, 12, 4], "head": [8, 8, 8], "leg": [4, 12, 4], "arms": [4, 12, 4],
+		"body_col": "5a7a4a", "head_col": "d8a878", "leg_col": "4a3a2a",
+		"arm_col": "5a7a4a", "sound": "mob_grunt",
+		"nose": "c87878", "nose_size": [4, 3, 2],
+	},
+	"blaze": {
+		"shape": "human", "hostile": true, "burn": false, "speed": 1.6,
+		"atk_dmg": 0.0, "atk_range": 12.0, "health": 20.0,
+		"body": [8, 12, 4], "head": [8, 8, 8], "leg": [4, 12, 4], "arms": [4, 12, 4],
+		"body_col": "e0a020", "head_col": "f0d040", "leg_col": "b87810",
+		"arm_col": "18181f", "sound": "mob_low",
+	},
 	# ---- wolves. Untamed ones are skittish and harmless; a wolf tamed with a bone
 	# follows its owner and fights hostile mobs on its own.
 	"wolf": {
@@ -141,6 +161,12 @@ var player = null
 var particles = null
 var kind := "pig"
 var def: Dictionary = {}
+## The id the host names this mob by in a spawn / death / hit event. Assigned by
+## mobs.gd, and zero for a mob that never reaches the wire.
+var net_id := 0
+## True for a body the host told us about: it is drawn here but simulated nowhere but
+## the host, so it runs no AI and never makes a drop of its own.
+var remote := false
 ## A villager's trade, chosen by its position, not by its kind: "Farmer", "Butcher",
 ## "Smith" or "Mason". Blank for every other mob.
 var profession := ""
@@ -505,6 +531,10 @@ func hurt_mob(amount: float, from: Vector3 = Vector3.ZERO) -> void:
 			velocity.z += away.z * 5.0
 			velocity.y = maxf(velocity.y, 4.0)
 	Sfx.play("mob_hurt", -14.0, randf_range(0.95, 1.1))
+	# a hit that the mob survives is worth telling the host-authoritative network about;
+	# a lethal one is announced by the death itself, so this only fires on a survivor
+	if health > 0.0 and manager != null and not remote:
+		manager.report_hurt(self)
 	if health <= 0.0:
 		die()
 
@@ -514,7 +544,18 @@ func die() -> void:
 		particles.burst(global_position + Vector3(0, _h * 0.5, 0), _col("body_col"), 12)
 	Sfx.play("mob_die", -12.0)
 	died.emit(kind, global_position)
+	# the host decides a mob's death; a remote body is only ever removed by its own
+	# death event, so it never reports
+	if manager != null and not remote:
+		manager.report_died(self)
 	queue_free()
+
+
+## A body the host told us about: no AI, just a hit flash that fades. Its movement, its
+## decisions and its drop all stay on the host.
+func tick_remote(delta: float) -> void:
+	_hurt_t = maxf(0.0, _hurt_t - delta)
+	_flash()
 
 
 ## Daylight burning: a hostile that does not survive the sun loses a heart a second.
@@ -677,7 +718,7 @@ func _tick_hostile(delta: float, player_pos: Vector3) -> float:
 		_dir = Vector3.ZERO
 
 	match kind:
-		"skeleton":
+		"skeleton", "blaze":
 			# hold a firing line: close in when far, back off when too close
 			if dist > 12.0:
 				pass

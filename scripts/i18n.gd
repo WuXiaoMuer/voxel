@@ -535,6 +535,7 @@ const ZH := {
 	"Nether Portal": "下界传送门",
 	"Nether Quartz": "下界石英",
 	"Nether Brick": "下界砖",
+	"Gold Nugget": "金粒",
 	"Soft, blood-red rock. The bulk of the nether's ground.": "柔软的血红色岩石，下界地面的大部分。",
 	"A slow, sucking patch of nether ground. You wade through it.": "一片缓慢下陷的下界地面，走进去像在涉水。",
 	"Dark, tightly laid nether bricks.": "深色、砌得很紧的下界砖。",
@@ -543,18 +544,22 @@ const ZH := {
 	"A lit doorway between the overworld and the nether.": "连接主世界与下界的发光门。",
 	"The quartz ore's drop. A pale crafting crystal.": "下界石英矿石的掉落物，一种浅色合成晶体。",
 	"Smelted from netherrack. Four press into a brick block.": "由下界岩烧制而成，四块可压成一个下界砖块。",
+	"A small nugget of gold. Pigmen drop them.": "一小粒金粒，僵尸猪灵的掉落物。",
 	"Into the Fire": "深入火海",
 	"Step through a nether portal.": "穿过一扇下界传送门。",
 	"Down Below": "地底之下",
 	"Dig up a block of netherrack.": "挖下一块下界岩。",
 	"Shiny Quartz": "闪亮石英",
 	"Mine nether quartz ore.": "开采下界石英矿石。",
+	"Pigman Slayer": "僵尸猪灵杀手",
+	"Kill a pigman in the nether.": "在下界击杀一只僵尸猪灵。",
 	"The nether takes you.": "下界将你卷入。",
 	"The overworld takes you back.": "主世界将你带回。",
 	"The nether": "下界",
 	"The overworld": "主世界",
 	# ---- mouse / window
 	"Lock the mouse while playing": "游玩时锁定鼠标",
+	"Touch controls": "触屏操作",
 }
 
 

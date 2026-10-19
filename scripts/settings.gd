@@ -32,6 +32,10 @@ var auto_jump := false
 ## leaves the pointer free to reach another monitor at the cost of look stopping at the
 ## window edge. Menus never capture either way; this is play only.
 var lock_mouse := true
+## On-screen touch controls: a virtual stick, a look-drag area and a button cluster.
+## They are shown automatically on a touchscreen device, but a desktop can force them
+## on with this (or the `--touch` command-line flag) for testing.
+var touch_controls := false
 var player_skin := 0
 var player_skin_path := ""      # a real Minecraft skin PNG, when one is chosen
 
@@ -141,6 +145,7 @@ func load_settings() -> void:
 	chunk_budget_ms = clampi(int(cf.get_value("video", "chunk_budget_ms", chunk_budget_ms)), 2, 40)
 	auto_jump = bool(cf.get_value("game", "auto_jump", auto_jump))
 	lock_mouse = bool(cf.get_value("input", "lock_mouse", lock_mouse))
+	touch_controls = bool(cf.get_value("input", "touch_controls", touch_controls))
 	player_skin = int(cf.get_value("game", "player_skin", player_skin))
 	player_skin_path = str(cf.get_value("game", "player_skin_path", player_skin_path))
 	render_distance = clampi(render_distance, MIN_RD, MAX_RD)
@@ -167,6 +172,7 @@ func save_settings() -> void:
 	cf.set_value("audio", "music", music_volume)
 	cf.set_value("game", "auto_jump", auto_jump)
 	cf.set_value("input", "lock_mouse", lock_mouse)
+	cf.set_value("input", "touch_controls", touch_controls)
 	cf.set_value("game", "player_skin", player_skin)
 	cf.set_value("game", "player_skin_path", player_skin_path)
 	cf.save(PATH)

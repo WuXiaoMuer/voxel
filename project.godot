@@ -36,6 +36,17 @@ window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
+; a first-person 3D game is played in landscape; sensor_landscape allows either way round
+window/handheld/orientation=4
+
+[input_devices]
+
+; Touch must not be mirrored into a mouse. Godot's default is to do it, and on a phone
+; that is fatal for this game: the same drag that drives the left stick also arrives as
+; a mouse motion, so pushing the stick turns the view, and a tap arrives as a left click
+; and mines the block under it. The touch layer takes over instead, bridging taps into
+; the menus where a pointer is actually wanted.
+pointing/emulate_mouse_from_touch=false
 
 [rendering]
 

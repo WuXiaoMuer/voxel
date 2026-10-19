@@ -316,6 +316,9 @@ const ITEM_BOAT := 353
 # four of them press into one nether-brick block.
 const ITEM_NETHER_QUARTZ := 354
 const ITEM_NETHER_BRICK := 355
+## The pigman's own drop: a small nugget of gold, the one thing a nether brute leaves
+## behind besides rotten flesh.
+const ITEM_GOLD_NUGGET := 356
 
 # ---------------------------------------------------------------- tile ids
 const T_GRASS_TOP := 0
@@ -796,6 +799,7 @@ func _build_defs() -> void:
 	names[ITEM_BOAT] = "Boat"
 	names[ITEM_NETHER_QUARTZ] = "Nether Quartz"
 	names[ITEM_NETHER_BRICK] = "Nether Brick"
+	names[ITEM_GOLD_NUGGET] = "Gold Nugget"
 
 	for id in range(0, 512):
 		var d = defs[id]

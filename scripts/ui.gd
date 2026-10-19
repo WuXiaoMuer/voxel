@@ -56,6 +56,7 @@ var _fs_btn: Button
 var _vsync_btn: Button
 var _bob_btn: Button
 var _lock_btn: Button
+var _touch_btn: Button
 var _fps_btn: Button
 var _skin_btn: Button
 var _skin_file_btn: Button
@@ -695,6 +696,12 @@ func _build_settings() -> Control:
 	_lock_btn.pressed.connect(_on_lock_mouse_pressed)
 	v.add_child(_lock_btn)
 
+	# the on-screen stick and buttons for a touchscreen. It is on automatically on a
+	# device that has one; this switch forces it on for testing on a desktop.
+	_touch_btn = _toggle("Touch controls", Settings.touch_controls)
+	_touch_btn.pressed.connect(_on_touch_pressed)
+	v.add_child(_touch_btn)
+
 	v.add_child(_section("PLAYER"))
 	_skin_btn = _button(I18n.tf("Skin: %s   (press F5 for third person)", [_skin_name()]), 556)
 	_skin_btn.pressed.connect(_on_skin_pressed)
@@ -936,6 +943,13 @@ func _on_lock_mouse_pressed() -> void:
 	Settings.lock_mouse = _lock_btn.button_pressed
 	_lock_btn.text = "%s: %s" % [I18n.t("Lock the mouse while playing"),
 		I18n.t("ON" if Settings.lock_mouse else "OFF")]
+	Settings.save_settings()
+
+
+func _on_touch_pressed() -> void:
+	Settings.touch_controls = _touch_btn.button_pressed
+	_touch_btn.text = "%s: %s" % [I18n.t("Touch controls"),
+		I18n.t("ON" if Settings.touch_controls else "OFF")]
 	Settings.save_settings()
 
 

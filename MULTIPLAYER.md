@@ -1,11 +1,34 @@
 # VOXELCRAFT — Multiplayer design
 
-**Status: the first slice is built.** Host-and-play, the handshake and block-edit
-synchronisation all work over a real ENet socket (see §8). Terrain is **not** streamed:
-because `terrain.gd` is seed-deterministic, a client builds the same world from the host's
-seed and only the *edit diff* travels — the simplification §9 predicted. What is still
-open: remote player avatars (§6), host-authoritative mobs and drops (§6), server-side
-commands (§7b), and the chunk-streaming path of §4 for a client that cannot generate.
+**Status: host-and-play works, and three of the four open items are now built.** Over a
+real ENet socket the pair exchanges the world seed and the accumulated *edit diff*, so
+both build the same terrain (it is seed-deterministic; nothing is streamed) and the same
+blocks. On top of that v1 now also:
+
+* **synced dimensions** — when the host walks through a doorway the clients follow,
+  through the same travel path, and a client that joins while the host is in the nether
+  starts there;
+* **shows remote players** — every peer reports its pose ~20 times a second and everyone
+  else draws it as the existing `player_model.gd` humanoid, freed the moment that peer
+  leaves;
+* **keeps mobs host-authoritative** — only the host (or a single player) makes spawning
+  decisions, and its spawns, hits and deaths are broadcast; a client never rolls a mob of
+  its own, never runs a remote body's AI, and never decides a remote mob's drop.
+
+What is **not** supported, deliberately, in v1:
+
+* **no mob *movement* on clients** — only the spawn / hit / death events travel, so a
+  remote mob appears where it was born and stands there; its walk is the host's alone.
+  Streaming transforms (the 5–10 Hz of §6) is the next slice, not this one.
+* **no dropped-item replication** — the host decides a drop and its pickup, but the
+  dropped entity itself is not streamed, so a client does not see the host's loot.
+* **no reach validation** — the host applies an edit request; there is no server-side
+  reach check yet, so there is also nothing to reject and no rollback branch.
+* **no chunk streaming for a client that cannot generate** (a non-shared seed or an
+  enormous render distance), **no NAT traversal, no host migration, no PvP balance, no
+  server-side commands** (see §7b).
+
+The rest of this document fixes the architecture the netcode was written against.
 
 The point of this document is to fix the *architecture* before a line of netcode is
 written, because the shape of the answer changes a lot of what `world.gd`,
@@ -148,21 +171,28 @@ agreeing because both apply the same confirmed stream.
 
 ## 6. Entities
 
-Players, mobs and dropped items.
+Players, mobs and dropped items. What is built today, and what it does *not* yet do:
 
-* **Remote players** are the existing `player_model.gd` humanoid driven by a
-  transform stream, no physics. Interpolate between the last two network transforms
-  with a ~100 ms buffer so movement looks smooth despite 20 Hz updates. Head yaw and
-  the arm-swing flag ride along so you can see someone else mining.
-* **Mobs** are simulated **on the host only**. It streams mob transforms at a lower
-  rate (5–10 Hz, they move slowly) and spawn/despawn events. Clients do not run the
-  mob AI. This kills duplicate-spawn and desync bugs at the cost of host CPU.
-* **Dropped items** are host-authoritative too: the host decides who picks up a drop
-  (first request wins), then broadcasts the removal and the inventory grant as two
-  events. Items are otherwise streamed like mobs.
-
-Position streaming at 20 Hz with interpolation and a short extrapolation window is
-the standard compromise: cheap, and the interpolation buffer hides packet jitter.
+* **Remote players — built.** A peer reports `(position, yaw)` ~20 times a second
+  (`Net.push_pose`): a client whispers it to the host, the host shows the sender and
+  relays it to everyone else, and each machine draws the reporter as the existing
+  `player_model.gd` humanoid, positioned straight from the report. There is **no
+  interpolation buffer yet** — the body snaps to each report — and the arm-swing flag
+  does not ride along, so a remote body's walk/idle is inferred from its reported
+  position staying put or not. A pose from a peer that leaves is dropped with it: the
+  avatar node is freed in the same handler as `player_left`.
+* **Mobs — host-authoritative, built minus movement.** Only the host (or a single
+  player) runs the spawner; a client's `mobs.update` never rolls a monster. The host
+  names every mob with a net id and broadcasts three events — *spawn* `(id, kind, pos)`,
+  *hit* `(id)`, *death* `(id)` — which a client turns into a redrawing body: `spawn`
+  builds a `mob.gd` body flagged `remote`, `hit` flashes it, `death` frees it. A remote
+  body runs **no AI** and its `raycast_mob` is skipped, so a client's swing can never
+  kill something the host has not killed, and a remote death never drops loot here.
+  What is *not* streamed is the mob's *transform*: a remote mob appears where it
+  spawned and then stands there. That is the 5–10 Hz transform stream still to come.
+* **Dropped items — designed, not built.** The host already owns every drop and its
+  pickup on its own machine, but the dropped entity is not replicated, so a client does
+  not see the host's loot. §9 is unchanged here.
 
 ---
 
@@ -170,13 +200,13 @@ the standard compromise: cheap, and the interpolation buffer hides packet jitter
 
 | File | Change |
 | --- | --- |
-| `world.gd` | ~~Route every voxel write through the authority interface~~ **done** (§3); still to do: add "apply a chunk received from the network" beside the existing load path. Meshing is unchanged. |
-| `player.gd` | Split "the local player" from "a remote avatar". The local one keeps input, physics and stats; the remote one is pose + interpolation only. |
-| `mobs.gd` | Gate AI behind `multiplayer.is_server()`; on clients, apply streamed transforms instead of simulating. |
-| `main.gd` | A `Mode.NETWORK` state; don't run the save writer as the sole authority on clients; send/receive initial world handshake. |
+| `world.gd` | ~~Route every voxel write through the authority interface~~ **done** (§3); `set_dimension` is what the dimension sync drives. Still to do: add "apply a chunk received from the network" beside the existing load path. Meshing is unchanged. |
+| `player.gd` | Unchanged: the local player keeps input, physics and stats, and a remote player is a second `player_model.gd` node parented to `main`, moved from the pose stream. |
+| `mobs.gd` | **done**: the spawner is gated on `local_spawning_enabled()`, mobs carry a net id, and `replicate_spawn` / `replicate_died` / `replicate_hurt` draw the host's events. Still to do: stream remote transforms. |
+| `main.gd` | **done**: the world handshake carries the host's dimension, `Net.dimension_changed` drives the client's own travel, `Net.remote_pose` drives the avatar map, `Net.mob_event_*` drives replication. |
 | `terrain.gd` | No change — it must stay pure and seed-deterministic. That is what makes client-side meshing agree with the host. |
-| new `net.gd` | Autoload: peer setup, RPC definitions, tick counter, the authority implementations. |
-| new `net_lobby` UI | Host/Join screen off the title menu. |
+| `net.gd` | **done**: peer setup, the handshake (now with the dimension), the edit RPCs, the dimension / pose / mob-event RPCs, and the two authority implementations. |
+| `ui.gd` | **done**: the Host/Join screen off the title menu. |
 
 ---
 
@@ -237,15 +267,29 @@ they slot in as a `level` lookup plus one more refusal branch.
    `Net.HostAuthority` applies and broadcasts; the joiner is handed the accumulated
    `serialize_edits()` diff. With no server-side reach check yet there is nothing to
    reject, so the rollback branch is not written.
-5. **Remote player avatars.**
-6. **Host-authoritative mobs and drops.**
-7. Polish: name tags, a player list, and the render-distance/bandwidth knobs. Chat,
-   commands and the op levels already exist (§7b) — the work here is routing them
-   through the server instead of running them locally.
+5. ~~**Remote player avatars.**~~ **Done, minus interpolation** — every peer reports its
+   pose ~20 Hz (`Net.push_pose`); the host relays it and each machine draws the reporter
+   as a `player_model.gd` body, freed on `player_left`. No interpolation buffer, no
+   arm-swing flag yet.
+6. ~~**Host-authoritative mobs and drops.**~~ **Mobs done minus movement, drops not yet.**
+   The spawner is host-only (`local_spawning_enabled()`), mobs carry a net id, and the
+   host's *spawn* / *hit* / *death* events build, flash and free a body on each client.
+   Mobs do **not** stream their transforms yet and **drops are not replicated**.
+7. ~~**Dimension sync.**~~ **Done** — the host announces the dimension from its travel
+   path, clients follow through the same path, and the handshake carries the host's
+   dimension so a joiner starts on the right side. (Not in the original list; it belongs
+   with the entity work because a client left in the wrong dimension is the same desync.)
+8. Polish: name tags, a player list, mob transform streaming, dropped-item replication,
+   and the render-distance/bandwidth knobs. Chat, commands and the op levels already
+   exist (§7b) — the work here is routing them through the server instead of running them
+   locally.
 
-Each step should be shippable and testable on its own; anything that cannot be
-verified without two machines gets a headless two-peer self-test (two `MultiplayerPeer`
-instances in one process over `localhost`) added to the harness.
+Each step should be shippable and testable on its own; anything that cannot be verified
+without two machines gets a **headless two-peer run** (`--netserve` in one process,
+`--netjoin` in another, over a real ENet socket on `localhost`) added to the harness. The
+`--selftest` suite drives the same seams directly — the dimension handler, the pose
+signal, the mob events, the host-only spawn gate — so a regression in the *logic* is
+caught by the ordinary headless run, and the two-peer run covers the socket itself.
 
 ---
 

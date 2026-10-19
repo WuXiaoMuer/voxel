@@ -183,6 +183,8 @@ func _build() -> void:
 			"Dig up a block of netherrack.", "break", {"want": [Blocks.NETHERRACK]}),
 		_d("quartz", "mining", Blocks.ITEM_NETHER_QUARTZ, "Shiny Quartz",
 			"Mine nether quartz ore.", "break", {"want": [Blocks.NETHER_QUARTZ_ORE]}),
+		_d("pigman", "adventure", Blocks.ITEM_GOLD_NUGGET, "Pigman Slayer",
+			"Kill a pigman in the nether.", "kill", {"want": ["pigman"]}),
 	]
 
 	_by_id = {}

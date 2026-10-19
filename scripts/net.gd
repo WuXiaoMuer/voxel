@@ -18,13 +18,26 @@ signal hosted()
 signal join_failed(reason: String)
 ## A client has been told the world parameters and the accumulated edit diff.
 signal welcomed(seed_value: int, creative: bool, distance: int, cheats: bool,
-	edits: PackedByteArray)
+	edits: PackedByteArray, dimension: int)
 signal player_joined(id: int)
 signal player_left(id: int)
 ## The host applied an edit a client asked for (used by the two-peer test).
 signal host_edit(pos: Vector3i, id: int)
 ## An authoritative edit arrived from the host (client side).
 signal edited(pos: Vector3i, id: int)
+## The host told us it changed dimension, so we go with it (client side). The host
+## raises this from `announce_dimension`, which it calls from its own travel path.
+signal dimension_changed(d: int)
+## Somebody's reported pose, to drive a remote avatar. On the host this is a client's
+## pose arriving; on a client it is the host relaying anyone's.
+signal remote_pose(id: int, pos: Vector3, yaw: float)
+## A mob the host spawned, to be shown as a body here (client side). The host makes the
+## spawning decision; a client only ever draws what it is told.
+signal mob_event_spawn(net_id: int, kind: String, pos: Vector3)
+## A mob the host killed (client side).
+signal mob_event_died(net_id: int)
+## A mob the host hit (client side).
+signal mob_event_hurt(net_id: int)
 
 enum Role { NONE, HOST, CLIENT }
 const DEFAULT_PORT := 27015
@@ -147,16 +160,18 @@ func _hello(nm: String) -> void:
 	players[id] = {"name": nm}
 	player_joined.emit(id)
 	rpc_id(id, "_welcome", int(world.seed_value), bool(player.creative),
-		int(world.render_distance), Commands.cheats_enabled, world.serialize_edits())
+		int(world.render_distance), Commands.cheats_enabled, world.serialize_edits(),
+		int(world.dimension))
 
 
-## Host -> a joining client: the world parameters and every edit so far.
+## Host -> a joining client: the world parameters, the dimension the host is in, and every
+## edit so far.
 @rpc("authority", "reliable")
 func _welcome(seed_value: int, creative: bool, distance: int, cheats: bool,
-		edits: PackedByteArray) -> void:
+		edits: PackedByteArray, dimension: int) -> void:
 	if role != Role.CLIENT:
 		return
-	welcomed.emit(seed_value, creative, distance, cheats, edits)
+	welcomed.emit(seed_value, creative, distance, cheats, edits, dimension)
 
 
 ## Client -> host: please make this edit. The host reapplies it through its own seam,
@@ -192,3 +207,93 @@ func _applied(pos: Vector3i, id: int) -> void:
 func send_edit(pos: Vector3i, id: int) -> void:
 	if role == Role.CLIENT:
 		rpc_id(1, "_edit", pos, id)
+
+
+# ================================================================ dimension sync
+## Host -> all clients: I have changed dimension, so follow me. Called from the host's
+## own travel path, so the two never play in different dimensions.
+func announce_dimension(d: int) -> void:
+	if role == Role.HOST and multiplayer.multiplayer_peer != null:
+		rpc("_dimension", d)
+
+
+@rpc("authority", "reliable")
+func _dimension(d: int) -> void:
+	if role != Role.CLIENT:
+		return
+	dimension_changed.emit(d)
+
+
+# ================================================================ remote player poses
+## A peer reports where it is. A client whispers to the host; the host shouts its own to
+## everyone. Called on a timer by main while a session is live.
+func push_pose(pos: Vector3, yaw: float) -> void:
+	if multiplayer.multiplayer_peer == null:
+		return
+	if role == Role.HOST:
+		rpc("_peer_pose", 1, pos, yaw)
+	elif role == Role.CLIENT:
+		rpc_id(1, "_pose", pos, yaw)
+
+
+## A client's pose arriving at the host: show it here and relay it to the other clients.
+@rpc("any_peer", "unreliable")
+func _pose(pos: Vector3, yaw: float) -> void:
+	if role != Role.HOST:
+		return
+	var id := multiplayer.get_remote_sender_id()
+	remote_pose.emit(id, pos, yaw)
+	rpc("_peer_pose", id, pos, yaw)
+
+
+## The host telling everybody where somebody is. A client ignores its own id, which comes
+## back to it through the relay.
+@rpc("authority", "unreliable")
+func _peer_pose(id: int, pos: Vector3, yaw: float) -> void:
+	if role != Role.CLIENT:
+		return
+	var my_id := 0
+	if multiplayer.multiplayer_peer != null:
+		my_id = multiplayer.get_unique_id()
+	if id == my_id:
+		return
+	remote_pose.emit(id, pos, yaw)
+
+
+# ================================================================ host-authoritative mobs
+## Host -> clients: a mob appeared at `pos` with this net id. The host makes the spawning
+## decision; a client only ever draws the body it is handed.
+func announce_mob_spawn(net_id: int, kind: String, pos: Vector3) -> void:
+	if role == Role.HOST and multiplayer.multiplayer_peer != null:
+		rpc("_mob_spawn", net_id, kind, pos)
+
+
+func announce_mob_died(net_id: int) -> void:
+	if role == Role.HOST and multiplayer.multiplayer_peer != null:
+		rpc("_mob_died", net_id)
+
+
+func announce_mob_hurt(net_id: int) -> void:
+	if role == Role.HOST and multiplayer.multiplayer_peer != null:
+		rpc("_mob_hurt", net_id)
+
+
+@rpc("authority", "reliable")
+func _mob_spawn(net_id: int, kind: String, pos: Vector3) -> void:
+	if role != Role.CLIENT:
+		return
+	mob_event_spawn.emit(net_id, kind, pos)
+
+
+@rpc("authority", "reliable")
+func _mob_died(net_id: int) -> void:
+	if role != Role.CLIENT:
+		return
+	mob_event_died.emit(net_id)
+
+
+@rpc("authority", "unreliable")
+func _mob_hurt(net_id: int) -> void:
+	if role != Role.CLIENT:
+		return
+	mob_event_hurt.emit(net_id)

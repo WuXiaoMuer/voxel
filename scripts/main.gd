@@ -19,6 +19,9 @@ var _grow_t := 0.0            # wheat growth clock
 var _sign_t := 0.0            # sign-label streaming clock
 var hud: CanvasLayer
 var ui: CanvasLayer
+## The mobile touch-control layer. Untyped like the other cross-script holds, so its
+## methods are reached dynamically.
+var touch
 var selection: MeshInstance3D
 var crack: MeshInstance3D
 
@@ -48,6 +51,9 @@ var _capture := ""
 var _capture_dir := "res://previews"
 ## Set by the client's two-peer test when the host's authoritative edit comes back.
 var _net_ok := false
+## The client's two-peer test's tally of the host's mob events: [spawn id, spawns, hurts,
+## deaths]. Kept as a list so the signal lambdas can mutate it.
+var _net_mob := [-1, 0, 0, 0]
 var _capture_seed := 1337
 var _fps_smooth := 60.0
 var _needs_spawn_fix := false
@@ -79,6 +85,11 @@ var _prev_flash := 0.0
 var xp_fx: Node3D
 var xp_orbs: Array = []
 var _xp_orb_mat: StandardMaterial3D
+## Remote players' avatars, keyed by peer id: the visible body of everyone else in the
+## session. Built when a pose arrives and freed the moment that peer leaves.
+var _remote_avatars: Dictionary = {}
+## The clock that paces our own pose reports to the other machines.
+var _net_pose_t := 0.0
 
 
 ## Stands in for the world's authority, to prove the seam really sees every
@@ -215,6 +226,14 @@ func _ready() -> void:
 	Net.join_failed.connect(_on_net_join_failed)
 	Net.player_joined.connect(_on_net_player_joined)
 	Net.player_left.connect(_on_net_player_left)
+	# The three things a session has to keep the two machines agreeing on beyond the
+	# blocks: which dimension everyone is in, where everyone is, and what the host's
+	# mobs are doing.
+	Net.dimension_changed.connect(_on_net_dimension)
+	Net.remote_pose.connect(_on_net_remote_pose)
+	Net.mob_event_spawn.connect(_on_net_mob_spawn)
+	Net.mob_event_died.connect(_on_net_mob_died)
+	Net.mob_event_hurt.connect(_on_net_mob_hurt)
 
 	# The command console is bound to the live nodes rather than reaching for them
 	# itself, which is what will let the same registry run server-side later.
@@ -225,6 +244,11 @@ func _ready() -> void:
 	hud.chat_canceled.connect(_close_chat)
 	hud.enchant_choice.connect(_on_enchant_choice)
 	hud.trade_choice.connect(_on_trade_choice)
+
+	touch = load("res://scripts/touch.gd").new()
+	touch.name = "Touch"
+	add_child(touch)
+	touch.build(player, world)
 
 	_build_selection()
 	_build_crack()
@@ -246,6 +270,9 @@ func _parse_args() -> void:
 			# a command-line language override, for screenshots and for players who
 			# want to pin a language without touching the settings file
 			I18n.set_lang(a.substr(7))
+		elif a == "--touch":
+			# force the mobile touch controls on, for testing them on a desktop
+			Settings.touch_controls = true
 		elif a == "--opaque-foliage":
 			Blocks.mat_cutout.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 			Blocks.mat_cross.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
@@ -430,6 +457,11 @@ func _on_mob_died(kind: String, pos: Vector3) -> void:
 			item_entities.drop(Blocks.ITEM_SLIME_BALL, 1 + randi() % 3, pos + Vector3(0, 0.3, 0))
 		"enderman":
 			item_entities.drop(Blocks.ITEM_ENDER_PEARL, 1, pos + Vector3(0, 0.3, 0))
+		"pigman":
+			# the nether's brute: rotten flesh like a zombie, plus a nugget of the gold
+			# it was built out of
+			item_entities.drop(Blocks.ITEM_ROTTEN_FLESH, 1 + randi() % 2, pos + Vector3(0, 0.3, 0))
+			item_entities.drop(Blocks.ITEM_GOLD_NUGGET, 1, pos + Vector3(0, 0.3, 0))
 		"iron_golem":
 			# a golem is built out of iron, so that is what is left of one
 			item_entities.drop(Blocks.ITEM_IRON, 3 + randi() % 3, pos + Vector3(0, 0.3, 0))
@@ -693,21 +725,102 @@ func _on_net_player_joined(id: int) -> void:
 		hud.toast(I18n.tf("%s joined.", [str(who.get("name", "A player"))]))
 
 
-func _on_net_player_left(_id: int) -> void:
+func _on_net_player_left(id: int) -> void:
+	# the departing player's body goes with them: no ghost left standing in the world
+	_drop_remote(id)
 	if mode == Mode.PLAY:
 		hud.toast(I18n.t("A player left."))
+
+
+## The host moved to another dimension: we follow, so the two never play apart. Doing it
+## through the ordinary travel path means the arriving side streams its own chunks and
+## lands at its own portal exactly as a single player would.
+func _on_net_dimension(d: int) -> void:
+	if Net.role != Net.Role.CLIENT or world == null:
+		return
+	if world.dimension == d or _travelling:
+		return
+	var p: Vector3 = player.global_position
+	var scale := 0.125 if d == 1 else 8.0
+	_enter_dimension(d, Vector3(p.x * scale, p.y, p.z * scale))
+
+
+## Somebody else's reported pose: build their body if it is not there yet and move it.
+func _on_net_remote_pose(id: int, pos: Vector3, yaw: float) -> void:
+	_apply_remote_pose(id, pos, yaw)
+
+
+## Where a remote player's body actually lives, so the selftest and any other caller can
+## reach it without walking the tree.
+func _remote_avatar(id: int):
+	var av = _remote_avatars.get(id)
+	if av != null and is_instance_valid(av):
+		return av
+	return null
+
+
+## Builds or moves the avatar for `id`. Kept out of the signal so it is callable
+## directly, but it is the one path a pose takes either way. `pin_facing` is what makes
+## the model itself carry the reported yaw: without it the body eases toward the look it
+## never receives and always ends up facing -z.
+func _apply_remote_pose(id: int, pos: Vector3, yaw: float) -> void:
+	var av = _remote_avatar(id)
+	if av == null:
+		av = load("res://scripts/player_model.gd").new()
+		av.name = "RemotePlayer_%d" % id
+		add_child(av)
+		_remote_avatars[id] = av
+	av.global_position = pos
+	av.pin_facing(yaw)
+
+
+## Frees a remote player's body. Erased from the map first so nothing can find a stale
+## handle, then queued away.
+func _drop_remote(id: int) -> void:
+	var av = _remote_avatars.get(id)
+	if av != null:
+		if is_instance_valid(av):
+			av.queue_free()
+		_remote_avatars.erase(id)
+
+
+## The host's mobs. Each event is a body appearing, a hit flash, or a body going away,
+## and the host has already decided all of it -- we only show it.
+func _on_net_mob_spawn(net_id: int, kind: String, pos: Vector3) -> void:
+	mobs.replicate_spawn(net_id, kind, pos)
+
+
+func _on_net_mob_died(net_id: int) -> void:
+	mobs.replicate_died(net_id)
+
+
+func _on_net_mob_hurt(net_id: int) -> void:
+	mobs.replicate_hurt(net_id)
+
+
+## Our own pose out to the session, and everyone else's bodies kept in step. Both are a
+## clock tick and a walk over a tiny dictionary, so a single-player frame pays nothing.
+func _net_tick(delta: float) -> void:
+	_net_pose_t -= delta
+	if Net.is_active() and _net_pose_t <= 0.0:
+		_net_pose_t = 0.05
+		Net.push_pose(player.global_position, player.yaw)
+	for id in _remote_avatars.keys():
+		var av = _remote_avatars[id]
+		if is_instance_valid(av):
+			av.animate(delta, 0.0, true, false, false, 0.0, 0.0)
 
 
 ## A joining client: build the host's world from its seed, then drop the host's accumulated
 ## edit diff on top. Terrain comes out of `terrain.gd` on both machines from the same seed,
 ## so the only thing that has to travel is the edits -- which is exactly what arrived.
 func _on_net_welcomed(seed_s: int, creative: bool, distance: int, cheats: bool,
-		edits: PackedByteArray) -> void:
-	_seed_network_world(seed_s, creative, distance, cheats, edits)
+		edits: PackedByteArray, dimension: int) -> void:
+	_seed_network_world(seed_s, creative, distance, cheats, edits, dimension)
 
 
 func _seed_network_world(s: int, creative: bool, distance: int, cheats: bool,
-		edits: PackedByteArray) -> void:
+		edits: PackedByteArray, dimension: int = 0) -> void:
 	world_name = "Multiplayer"
 	seed_value = s
 	world_dir = ""
@@ -738,6 +851,16 @@ func _seed_network_world(s: int, creative: bool, distance: int, cheats: bool,
 	spawn_point = Vector3.ZERO
 	sky.set_weather(sky.Weather.CLEAR, true)
 	sky.set_dimension(0)
+	_travel_cooldown = 0.0
+	_portal_timer = 0.0
+	_travelling = false
+	# If the host is in the nether when we join, we start there too: the diff that
+	# arrived is the *active* dimension's, so the switch has to happen before it is
+	# replayed or the edits would land in the overworld.
+	if dimension == 1:
+		world.set_dimension(1)
+		containers.set_dimension(1)
+		sky.set_dimension(1)
 	# the host's changes, replayed as chunks stream in (the same path the save loader uses),
 	# then the client authority so my own edits predict locally and ask the host
 	world.load_edits(edits)
@@ -1030,6 +1153,9 @@ func _enter_dimension(to: int, dest: Vector3, at_override = null) -> void:
 	world.set_dimension(to)
 	containers.set_dimension(to)
 	sky.set_dimension(to)
+	# the host tells everyone else to come too, so nobody is left behind in the old
+	# dimension. A no-op in single player and on a client.
+	Net.announce_dimension(to)
 	await _stream_at(dest)
 	var at: Vector3 = at_override if at_override != null else _portal_arrival(to, dest)
 	player.place_at(at)
@@ -1863,6 +1989,12 @@ func _sync_signs(delta: float) -> void:
 
 func _process(delta: float) -> void:
 	_fps_smooth = lerpf(_fps_smooth, 1.0 / maxf(delta, 0.0001), clampf(delta * 6.0, 0.0, 1.0))
+	# The touch controls only belong on screen in live play; a panel, the loading screen,
+	# the pause menu or the death screen all take them away, and `input_enabled` follows
+	# the same rule.
+	if touch != null:
+		touch.set_allowed(mode == Mode.PLAY and not _menu_open())
+		touch.set_menu(_menu_open())
 	# Backstop for the capture grab: if the pointer is still captured and our window is no
 	# longer focused, release it now. The OS focus notification does not always land with
 	# the pointer still clipped to us, and on Windows that means the cursor is trapped in
@@ -1900,6 +2032,7 @@ func _process(delta: float) -> void:
 		_update_selection()
 		_update_crack()
 		_portal_check(delta)
+		_net_tick(delta)
 		# night vision: the environment brightens while the potion lasts
 		var want_nv: bool = player.has_effect("night")
 		if want_nv != _night_vision:
@@ -1962,6 +2095,9 @@ func _debug_text() -> String:
 var _pass := 0
 var _fail := 0
 var _probe_dist := 0.0
+## The last position each touch index was seen at, so `_touch_drag` can report the step a
+## real finger event would carry.
+var _touch_prev: Dictionary = {}
 
 
 ## Walks in each of the four cardinal directions for a moment, optionally holding
@@ -2032,6 +2168,55 @@ func _slot_of(id: int) -> int:
 		if int(player.hotbar[i]["id"]) == id:
 			return i
 	return -1
+
+
+## The touch layer, looked up by name. Untyped on purpose, so its methods are reached
+## dynamically the way every other cross-script reference in this file is.
+func _touch():
+	return get_node_or_null("Touch")
+
+
+## Canvas coordinates -> the window coordinates input events are expressed in. The
+## viewport is stretched to the window on a device, so this is not always identity and a
+## synthesised pointer event has to be converted or it lands somewhere else entirely.
+func _to_window(p: Vector2) -> Vector2:
+	return get_viewport().get_final_transform() * p
+
+
+## Feeds a touch straight through the engine's input pipeline, so the layer sees it
+## exactly the way a real finger would. `at` is in canvas coordinates.
+func _touch_event(index: int, at: Vector2, pressed: bool) -> void:
+	var ev := InputEventScreenTouch.new()
+	ev.index = index
+	ev.position = _to_window(at)
+	ev.pressed = pressed
+	_touch_prev[index] = _to_window(at)
+	Input.parse_input_event(ev)
+
+
+## A finger sliding to `at` (canvas coordinates). The layer works out the delta from its
+## own last position, and a real finger event also reports the step it just travelled as
+## `relative` -- the engine's touch-to-mouse emulation forwards exactly that value, so a
+## synthesised drag without it looks like a motion of zero and cannot reproduce what the
+## game does on a device.
+func _touch_drag(index: int, at: Vector2) -> void:
+	var pos := _to_window(at)
+	var prev: Vector2 = _touch_prev.get(index, pos)
+	var ev := InputEventScreenDrag.new()
+	ev.index = index
+	ev.position = pos
+	ev.relative = pos - prev
+	_touch_prev[index] = pos
+	Input.parse_input_event(ev)
+
+
+## Parks the emulated mouse at `at` with zero motion, so a following touch cannot turn
+## the view through the engine's touch-to-mouse emulation and skew a movement check.
+func _park_mouse(at: Vector2) -> void:
+	var mm := InputEventMouseMotion.new()
+	mm.position = _to_window(at)
+	mm.relative = Vector2.ZERO
+	Input.parse_input_event(mm)
 
 
 func _run_selftest() -> void:
@@ -3540,6 +3725,43 @@ func _run_selftest() -> void:
 		var safe: Vector3 = world.safe_spawn_near(player.global_position + Vector3(8, 0, 8))
 		_check("a nether safe spot stays inside the cavern, not up on the roof",
 			safe.y <= float(VoxelTerrain.NETHER_TOP), "y=%.1f" % safe.y)
+
+		# ---- the nether's own mobs. The dimension keeps a hostile roster of its own, so
+		# no overworld mob is ever rolled here, and -- the other way round -- no pigman or
+		# blaze can leak out of the spawner once the player is home again.
+		_check("the nether hostile roster carries pigmen",
+			mobs.hostile_roster().has("pigman"), str(mobs.hostile_roster()))
+		_check("the nether hostile roster carries blazes",
+			mobs.hostile_roster().has("blaze"))
+		var net_pmob = mobs.spawn_at("pigman", player.global_position + Vector3(2.0, 0.0, 0.0))
+		_check("a pigman is a hostile mob", net_pmob.is_hostile())
+		_check("a pigman does not burn in the sun",
+			not bool(net_pmob.def.get("burn", false)))
+		var zmob = mobs.spawn_at("zombie", player.global_position + Vector3(-2.0, 0.0, 0.0))
+		_check("but an overworld zombie does burn in the sun",
+			bool(zmob.def.get("burn", false)))
+		var bmob = mobs.spawn_at("blaze", player.global_position + Vector3(0.0, 0.0, 2.0))
+		_check("a blaze is a hostile mob", bmob.is_hostile())
+		_check("a blaze does not burn in the sun",
+			not bool(bmob.def.get("burn", false)))
+		# Kill the pigman through the real damage path -- its loot has to fall out of the
+		# death signal a killed zombie's does, not from health being edited by hand here.
+		# The zombie and blaze go first, so none of their loot can pad the baseline.
+		bmob.hurt_mob(100.0)
+		zmob.hurt_mob(100.0)
+		var flesh_before := 0
+		for it in item_entities.items:
+			if is_instance_valid(it) and int(it.item_id) == Blocks.ITEM_ROTTEN_FLESH:
+				flesh_before += 1
+		var loot_before_net: int = item_entities.items.size()
+		net_pmob.hurt_mob(100.0)
+		var flesh_after := 0
+		for it in item_entities.items:
+			if is_instance_valid(it) and int(it.item_id) == Blocks.ITEM_ROTTEN_FLESH:
+				flesh_after += 1
+		_check("killing a pigman leaves rotten flesh on the ground",
+			item_entities.items.size() > loot_before_net and flesh_after > flesh_before,
+			"%d -> %d" % [loot_before_net, item_entities.items.size()])
 		for i in 3000:
 			if world.dimension == 0 and not _travelling and mode == Mode.PLAY:
 				break
@@ -3548,6 +3770,343 @@ func _run_selftest() -> void:
 			"dim=%d" % world.dimension)
 		_check("the overworld's chunks come back with it", world.loaded_chunks() > 10,
 			"chunks=%d" % world.loaded_chunks())
+		_check("the overworld roster keeps the nether mobs out",
+			not mobs.hostile_roster().has("pigman")
+				and not mobs.hostile_roster().has("blaze"))
+
+	# ---- touch controls. The mobile layer must show on a touchscreen (or when forced
+	# on), stay completely hidden on a plain desktop, lay itself out inside the screen
+	# without covering the hotbar, and drive the game through real synthesised touches.
+	var touch = _touch()
+	_check("the touch layer is built with the scene", touch != null)
+	Settings.touch_controls = false
+	for i in 4:
+		await get_tree().process_frame
+	_check("with no touchscreen and no force switch the layer stays hidden",
+		touch != null and not touch.is_active(),
+		"active=%s" % (str(touch.is_active()) if touch != null else "missing"))
+	Settings.touch_controls = true
+	for i in 4:
+		await get_tree().process_frame
+	_check("the force switch shows the touch layer", touch != null and touch.is_active())
+	var touch_names := ["joystick", "attack", "use", "jump", "sneak", "backpack", "fly",
+		"menu"]
+	var touch_missing := ""
+	for nm in touch_names:
+		if touch == null or not touch.has_control(nm):
+			touch_missing += nm + " "
+	_check("every control the mobile player needs is present",
+		touch != null and touch_missing == "", touch_missing)
+
+	if touch != null:
+		# layout: every control fully on screen, each at least 72 units tall and wide,
+		# none overlapping another, and none sitting on the hotbar
+		var vs: Vector2 = touch.view_size()
+		var rects: Dictionary = touch.control_rects()
+		var oob := ""
+		var small := ""
+		for nm in rects:
+			var r: Rect2 = rects[nm]
+			if r.position.x < -0.5 or r.position.y < -0.5 \
+					or r.end.x > vs.x + 0.5 or r.end.y > vs.y + 0.5:
+				oob += nm + " "
+			if minf(r.size.x, r.size.y) < 72.0:
+				small += nm + " "
+		_check("every touch control fits inside the viewport", oob == "",
+			"viewport=%s out=%s" % [str(vs), oob])
+		_check("every touch control meets the 72-unit minimum", small == "", small)
+		var keys: Array = rects.keys()
+		var overlap := ""
+		for i in keys.size():
+			for j in range(i + 1, keys.size()):
+				if (rects[keys[i]] as Rect2).intersects(rects[keys[j]] as Rect2):
+					overlap += "%s/%s " % [keys[i], keys[j]]
+		_check("touch controls do not overlap one another", overlap == "", overlap)
+		var hb := Rect2(hud.hotbar_panel.position, hud.hotbar_panel.size)
+		var clash := ""
+		for nm in rects:
+			if (rects[nm] as Rect2).intersects(hb):
+				clash += nm + " "
+		_check("no touch control overlaps the hotbar", clash == "",
+			"hotbar=%s clash=%s" % [str(hb), clash])
+
+		# a grounded, still player for a deterministic movement test
+		mobs.reset()
+		player.creative = false
+		player.health = 20.0
+		player.place_at(world.safe_spawn_near(player.global_position))
+		player.yaw = 0.0
+		player.pitch = 0.0
+		for i in 240:
+			if player.on_ground and player.velocity.length() < 0.05:
+				break
+			await get_tree().physics_frame
+		_check("the touch test stands the player on solid ground", player.on_ground,
+			"on_ground=%s" % str(player.on_ground))
+
+		# a corridor ahead so a stray tree cannot swallow the walk below
+		var cpx := floori(player.global_position.x)
+		var cpz := floori(player.global_position.z)
+		var cpy := floori(player.global_position.y)
+		for ck in range(1, 5):
+			world.set_block(cpx, cpy, cpz - ck, Blocks.AIR)
+			world.set_block(cpx, cpy + 1, cpz - ck, Blocks.AIR)
+
+		# 1. the joystick: drag it up and the player walks forward (-z at yaw 0), through
+		#    the real movement path the stick drives with Input.action_press
+		var jc: Vector2 = (rects["joystick"] as Rect2).get_center()
+		_park_mouse(jc)
+		var before_pos: Vector3 = player.global_position
+		_touch_event(0, jc, true)
+		_touch_drag(0, jc + Vector2(0, -70))
+		for i in 30:
+			await get_tree().physics_frame
+		_touch_event(0, jc + Vector2(0, -70), false)
+		var walked: Vector3 = player.global_position - before_pos
+		_check("dragging the joystick up walks the player forward",
+			walked.z < -0.3 and absf(walked.x) < absf(walked.z),
+			"delta=(%.2f, %.2f)" % [walked.x, walked.z])
+
+		# 1b. a stick push must not slew the camera. With the engine's touch-to-mouse
+		#     emulation left on, the very same touch is also handed to the game as a mouse
+		#     motion, and the mouse-look chain eats it, so a sideways push turns the view.
+		#     The stick itself only presses movement actions, so any yaw here came in
+		#     through that second path. Parking the emulated mouse first keeps the swing
+		#     measurable rather than folded into the pointer's own travel.
+		_park_mouse(jc)
+		var yaw_joy0: float = player.yaw
+		_touch_event(4, jc, true)
+		_touch_drag(4, jc + Vector2(80, 0))
+		for i in 6:
+			await get_tree().process_frame
+		_touch_event(4, jc + Vector2(80, 0), false)
+		_check("dragging the joystick does not turn the view",
+			absf(player.yaw - yaw_joy0) < 0.01,
+			"dyaw=%.4f" % (player.yaw - yaw_joy0))
+
+		# 2. the look area: a drag turns the view through the existing mouse-look chain
+		var yaw0: float = player.yaw
+		var look_pos := Vector2(vs.x * 0.5, vs.y * 0.35)
+		_touch_event(1, look_pos, true)
+		_touch_drag(1, look_pos + Vector2(90, 0))
+		for i in 6:
+			await get_tree().process_frame
+		_touch_event(1, look_pos + Vector2(90, 0), false)
+		_check("dragging the look area turns the view", absf(player.yaw - yaw0) > 0.02,
+			"dyaw=%.4f" % (player.yaw - yaw0))
+
+		# 3. the jump button: a tap lifts the player off the ground
+		for i in 120:
+			if player.on_ground:
+				break
+			await get_tree().physics_frame
+		var was_ground: bool = player.on_ground
+		var jump_center: Vector2 = (rects["jump"] as Rect2).get_center()
+		_touch_event(2, jump_center, true)
+		var jumped := false
+		for i in 40:
+			await get_tree().physics_frame
+			if not player.on_ground:
+				jumped = true
+				break
+		_touch_event(2, jump_center, false)
+		_check("tapping the jump button lifts the player off the ground",
+			was_ground and jumped, "was=%s jumped=%s" % [str(was_ground), str(jumped)])
+
+		# 4. the dig button: held down, it breaks the block the player is aimed at, along
+		#    the real interaction path the mouse button feeds
+		Input.action_release("attack")
+		for i in 4:
+			await get_tree().physics_frame
+		mobs.reset()
+		player.place_at(world.safe_spawn_near(player.global_position))
+		player.yaw = 0.0
+		player.pitch = 0.0
+		for i in 20:
+			await get_tree().physics_frame
+		var tdx := floori(player.global_position.x)
+		var tdz := floori(player.global_position.z)
+		var tdy := floori(player.eye_position().y)
+		world.set_block(tdx, tdy, tdz - 1, Blocks.AIR)
+		world.set_block(tdx, tdy, tdz - 2, Blocks.AIR)
+		world.set_block(tdx, tdy, tdz - 3, Blocks.DIRT)
+		for i in 3:
+			await get_tree().physics_frame
+		var dtgt: Vector3i = player.look_at_block().get("pos", Vector3i(-999, 0, 0))
+		_check("the touch dig aims at the reference block",
+			dtgt == Vector3i(tdx, tdy, tdz - 3),
+			"target=%s want=%s" % [str(dtgt), str(Vector3i(tdx, tdy, tdz - 3))])
+		var attack_center: Vector2 = (rects["attack"] as Rect2).get_center()
+		_park_mouse(attack_center)
+		_touch_event(3, attack_center, true)
+		# the touch is buffered, so give the layer a frame to turn it into the action
+		for i in 3:
+			await get_tree().physics_frame
+		_check("the dig button drives the real attack action",
+			Input.is_action_pressed("attack"))
+		var dug := false
+		for i in 300:
+			await get_tree().physics_frame
+			if world.get_block(dtgt.x, dtgt.y, dtgt.z) == Blocks.AIR:
+				dug = true
+				break
+		_touch_event(3, attack_center, false)
+		_check("holding the touch dig button breaks the block", dug,
+			"target=%s now=%d" % [str(dtgt), world.get_block(dtgt.x, dtgt.y, dtgt.z)])
+
+		# 5. the menu pointer, a device path the stick tests never cover. A finger has to
+		#    reach the real Buttons, and with the engine's touch-to-mouse emulation off
+		#    that only happens if the touch layer bridges the tap itself. Force the touch
+		#    path (as a phone would), pause, tap the first pause button -- BACK TO GAME --
+		#    and require the game to actually come back, which only a delivered click can do.
+		_pause()
+		for i in 6:
+			await get_tree().process_frame
+		_check("the pause menu is up for the touch check",
+			mode == Mode.PAUSE and ui.current == "pause",
+			"mode=%d screen=%s" % [mode, ui.current])
+		var pause_buttons = ui.screens["pause"].find_children("*", "Button", true, false)
+		if pause_buttons.size() > 0:
+			var pause_btn: Button = pause_buttons[0]
+			var bc: Vector2 = pause_btn.global_position + pause_btn.size * 0.5
+			_touch_event(4, bc, true)
+			for i in 2:
+				await get_tree().process_frame
+			_touch_event(4, bc, false)
+			for i in 6:
+				await get_tree().process_frame
+		_check("tapping a menu button still works with touch",
+			mode == Mode.PLAY and ui.current == "",
+			"mode=%d screen=%s" % [mode, ui.current])
+
+	Settings.touch_controls = false
+
+	# ---- multiplayer: dimension follow, remote bodies, and host-authoritative mobs.
+	# These drive the real Net entry points -- the RPC bodies, the signals main already
+	# listens to, and the ordinary travel path -- with this one process dressed up as a
+	# client, which is what a single headless run can do of a two-machine feature. The
+	# socket itself is exercised by --netserve / --netjoin.
+
+	# (A) single player is untouched. The whole suite above ran with no session, and even
+	#     with the net layer present the spawner keeps making its own decisions and a kill
+	#     still drops its loot.
+	var role_before: int = Net.role
+	_check("everything above ran with no multiplayer session open",
+		role_before == Net.Role.NONE and not Net.is_active(),
+		"role=%d" % role_before)
+	mobs.reset()
+	var solo_spawner: bool = mobs.local_spawning_enabled()
+	var solo_events := [0]
+	var solo_evt = func(_i: int, _k: String, _p: Vector3) -> void: solo_events[0] += 1
+	Net.mob_event_spawn.connect(solo_evt)
+	var solo_mob = mobs.spawn_at("pig", player.global_position + Vector3(3.0, 0.0, 0.0))
+	var solo_loot_before: int = item_entities.items.size()
+	solo_mob.hurt_mob(100.0)
+	var solo_loot_after: int = item_entities.items.size()
+	Net.mob_event_spawn.disconnect(solo_evt)
+	_check("with no session the spawner stays open and a kill still drops its loot",
+		solo_spawner and solo_loot_after > solo_loot_before and solo_events[0] == 0,
+		"spawner=%s loot=%d->%d events=%d" % [str(solo_spawner), solo_loot_before,
+			solo_loot_after, solo_events[0]])
+	mobs.reset()
+
+	# (B) a client follows the host's dimension. The host raises `_dimension` from its own
+	#     travel path; here the client's end of it is run through the real handler, and the
+	#     switch goes through the ordinary travel path either way.
+	Net.role = Net.Role.CLIENT
+	var tw := 0.0
+	Net._dimension(1)
+	while world.dimension != 1 and tw < 40.0:
+		tw += get_process_delta_time()
+		await get_tree().process_frame
+	_check("a client follows the host into the nether", world.dimension == 1,
+		"dim=%d" % world.dimension)
+	tw = 0.0
+	Net._dimension(0)
+	while world.dimension != 0 and tw < 40.0:
+		tw += get_process_delta_time()
+		await get_tree().process_frame
+	_check("and the client comes home with the host again", world.dimension == 0,
+		"dim=%d" % world.dimension)
+	mobs.reset()
+
+	# (C) a remote player is a visible body, put where the host reported it, and freed the
+	#     moment that player leaves.
+	var rp: Vector3 = player.global_position + Vector3(4.0, 0.0, 0.0)
+	Net._peer_pose(7, rp, 1.2)
+	var av = _remote_avatar(7)
+	tw = 0.0
+	while av == null and tw < 5.0:
+		tw += get_process_delta_time()
+		await get_tree().process_frame
+		av = _remote_avatar(7)
+	_check("a client builds a visible body for a remote player",
+		av != null and av.visible and av is Node3D,
+		"node=%s" % (str(av) if av != null else "missing"))
+	for i in 4:
+		await get_tree().process_frame
+	var near_dist := 999.0
+	if av != null:
+		near_dist = av.global_position.distance_to(rp)
+	_check("the body sits where the host reported it", av != null and near_dist < 0.5,
+		"dist=%.3f" % near_dist)
+	Net.player_left.emit(7)
+	var freed := false
+	tw = 0.0
+	while tw < 5.0:
+		if not is_instance_valid(av):
+			freed = true
+			break
+		tw += get_process_delta_time()
+		await get_tree().process_frame
+	var stragglers := 0
+	for ch in get_children():
+		if str(ch.name).begins_with("RemotePlayer_"):
+			stragglers += 1
+	_check("the body is released when the player leaves, with no node left behind",
+		freed and stragglers == 0 and _remote_avatar(7) == null,
+		"freed=%s leftover=%d" % [str(freed), stragglers])
+
+	# (D) a client never makes a spawning decision of its own, however dark it gets.
+	mobs.reset()
+	mobs._timer = -1.0
+	for i in 400:
+		mobs.update(player.global_position, 0.1, true)
+	_check("a client spawns no hostile mob of its own",
+		mobs.count() == 0 and mobs.count_hostile() == 0,
+		"mobs=%d hostile=%d" % [mobs.count(), mobs.count_hostile()])
+
+	# (E) the host's mobs, shown on the client: a spawn makes a body, a hit flashes it, a
+	#     death takes it away, and the client cannot decide any of it with its own swing.
+	Net._mob_spawn(21, "zombie", player.global_position + Vector3(2.0, 0.0, 2.0))
+	Net._mob_spawn(22, "pig", player.global_position + Vector3(-2.0, 0.0, 2.0))
+	tw = 0.0
+	while mobs.mob_with_id(21) == null and tw < 5.0:
+		tw += get_process_delta_time()
+		await get_tree().process_frame
+	_check("a mob the host spawned shows up on the client",
+		mobs.mob_with_id(21) != null and mobs.mob_with_id(22) != null,
+		"zombie=%s pig=%s" % [str(mobs.mob_with_id(21) != null),
+			str(mobs.mob_with_id(22) != null)])
+	Net._mob_hurt(21)
+	var z21 = mobs.mob_with_id(21)
+	_check("a mob the host hits flashes on the client",
+		z21 != null and z21._hurt_t > 0.0,
+		"hurt_t=%.2f" % (z21._hurt_t if z21 != null else -1.0))
+	Net._mob_died(21)
+	_check("a mob the host kills is taken off the client",
+		mobs.mob_with_id(21) == null, "alive=%s" % str(mobs.mob_with_id(21) != null))
+	var p22 = mobs.mob_with_id(22)
+	var swing_hit = null
+	if p22 != null:
+		swing_hit = mobs.raycast_mob(player.eye_position(),
+			(p22.global_position - player.eye_position()).normalized(), 20.0)
+	_check("the client cannot decide a remote mob's death with its own swing",
+		p22 != null and swing_hit == null, "hit=%s" % str(swing_hit))
+
+	# back to single player for anything that comes after
+	mobs.reset()
+	Net.role = role_before
 
 	print("=== selftest: %d passed, %d failed ===" % [_pass, _fail])
 
@@ -5190,21 +5749,50 @@ func _net_serve() -> void:
 	if not Net.host(14999, "Host"):
 		print("NET HOST FAIL")
 		return
-	_on_new_world("NetTest", 4242, true, 3, true)
+	_on_new_world("NetTest", 4242, true, 2, true)
 	world.authority = Net.HostAuthority.new()
 	await _wait_loaded()
 	print("NET HOST READY")
-	var got := [false, false]
+	var got := [false, false, false]    # joined, edited, client pose seen
 	Net.player_joined.connect(func(_id: int) -> void: got[0] = true)
 	Net.host_edit.connect(func(_p: Vector3i, _i: int) -> void: got[1] = true)
+	Net.remote_pose.connect(func(_id: int, _p: Vector3, _y: float) -> void: got[2] = true)
+	var mob = null
+	var stage := 0
 	var t := 0.0
-	while not (got[0] and got[1]) and t < 60.0:
+	while t < 180.0:
+		# report our own pose, which is what gives the client a body to show for us
+		Net.push_pose(player.global_position, player.yaw)
+		if got[0] and stage == 0:
+			stage = 1
+			# spawn, hit, kill: the client has to see all three, and the drop is ours
+			mob = mobs.spawn_at("zombie", player.global_position + Vector3(3.0, 0.0, 0.0))
+		if mob != null and got[2] and stage == 1:
+			stage = 2
+			mob.hurt_mob(1.0)
+			mob.hurt_mob(100.0)
+		if stage == 2 and got[0] and got[1] and got[2]:
+			stage = 3
+			# and through the real doorway: the client has to come with us
+			print("NET HOST TRAVEL")
+			await _enter_dimension(1, Vector3(player.global_position.x * 0.125,
+				player.global_position.y, player.global_position.z * 0.125))
+			print("NET HOST TRAVELLED dim=%d" % world.dimension)
+			# stay up long enough for the client to finish its own switch and checks,
+			# or its connection would drop mid-flight. Wall-clock, not frames, because a
+			# headless run does not run at any particular frame rate.
+			var hold := 0.0
+			while hold < 40.0:
+				hold += get_process_delta_time()
+				await get_tree().process_frame
+			break
 		t += get_process_delta_time()
 		await get_tree().process_frame
-	if got[0] and got[1]:
+	if got[0] and got[1] and got[2]:
 		print("NET HOST OK")
 	else:
-		print("NET HOST TIMEOUT joined=%s edit=%s" % [str(got[0]), str(got[1])])
+		print("NET HOST TIMEOUT joined=%s edit=%s pose=%s" % [str(got[0]), str(got[1]),
+			str(got[2])])
 
 
 func _net_join() -> void:
@@ -5214,15 +5802,20 @@ func _net_join() -> void:
 		get_tree().quit())
 	Net.welcomed.connect(_net_test_welcomed)
 	Net.edited.connect(func(_p: Vector3i, _i: int) -> void: _net_ok = true)
+	Net.mob_event_spawn.connect(func(id: int, _k: String, _p: Vector3) -> void:
+		_net_mob[0] = id
+		_net_mob[1] += 1)
+	Net.mob_event_hurt.connect(func(_id: int) -> void: _net_mob[2] += 1)
+	Net.mob_event_died.connect(func(_id: int) -> void: _net_mob[3] += 1)
 	if not Net.join("127.0.0.1", 14999, "Client"):
 		print("NET CLIENT START FAIL")
 		get_tree().quit()
 
 
 func _net_test_welcomed(seed_s: int, creative: bool, distance: int, cheats: bool,
-		edits: PackedByteArray) -> void:
-	print("NET CLIENT WELCOME seed=%d edits=%d" % [seed_s, edits.size()])
-	_seed_network_world(seed_s, creative, distance, cheats, edits)
+		edits: PackedByteArray, dimension: int) -> void:
+	print("NET CLIENT WELCOME seed=%d edits=%d dim=%d" % [seed_s, edits.size(), dimension])
+	_seed_network_world(seed_s, creative, distance, cheats, edits, dimension)
 	await _wait_loaded()
 	await _settle()
 	var px := floori(player.global_position.x)
@@ -5231,10 +5824,24 @@ func _net_test_welcomed(seed_s: int, creative: bool, distance: int, cheats: bool
 	print("NET CLIENT READY; sending edit")
 	world.set_block(px + 1, py, pz, Blocks.STONE)
 	var t := 0.0
-	while not _net_ok and t < 60.0:
+	var avatar_ok := false
+	while t < 90.0:
+		if _remote_avatar(1) != null:
+			avatar_ok = true
+		# every piece of the picture has arrived: our own edit confirmed, the host's
+		# body on screen at roughly where it reported, a mob shown, hit and then gone,
+		# and the host's dimension change followed
+		if _net_ok and avatar_ok and _net_mob[1] > 0 and _net_mob[2] > 0 and _net_mob[3] > 0 \
+				and mobs.mob_with_id(_net_mob[0]) == null and world.dimension == 1:
+			break
 		t += get_process_delta_time()
 		await get_tree().process_frame
-	print("NET OK" if _net_ok else "NET CLIENT TIMEOUT")
+	print("NET CLIENT avatar=%s mob=%s/%s/%s gone=%s dim=%d" % [
+		str(avatar_ok), str(_net_mob[1]), str(_net_mob[2]), str(_net_mob[3]),
+		str(mobs.mob_with_id(_net_mob[0]) == null), world.dimension])
+	var ok: bool = _net_ok and avatar_ok and _net_mob[1] > 0 and _net_mob[2] > 0 \
+		and _net_mob[3] > 0 and mobs.mob_with_id(_net_mob[0]) == null and world.dimension == 1
+	print("NET OK" if ok else "NET CLIENT TIMEOUT")
 	get_tree().quit()
 
 

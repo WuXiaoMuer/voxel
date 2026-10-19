@@ -20,6 +20,10 @@ const DESPAWN := 96.0
 const PASSIVE := ["pig", "pig", "sheep", "cow", "chicken"]
 const HOSTILE := ["zombie", "zombie", "skeleton", "spider", "creeper", "slime",
 	"enderman"]
+## The nether's own roster. The surface's HOSTILE list holds no pigman or blaze, and this
+## one holds no overworld mob: each dimension rolls only what belongs to it, so a nether
+## mob can never walk out onto the grass at dusk and a zombie never turns up in the lava.
+const NETHER := ["pigman", "pigman", "blaze"]
 ## A villager's trade, picked from where it stands rather than from anything stored, so
 ## the same village always has the same shopkeepers without a save file.
 const PROFESSIONS := ["Farmer", "Butcher", "Smith", "Mason"]
@@ -38,6 +42,9 @@ var projectiles = null
 var mobs: Array = []
 var _timer := 1.5
 var _script := preload("res://scripts/mob.gd")
+## Names every mob the host spawns, so a spawn / death / hit event can point at one body
+## on the other machines. Only the host ever hands these out.
+var _next_net_id := 1
 
 
 func setup(w) -> void:
@@ -83,13 +90,80 @@ func _spawn(kind: String, pos: Vector3):
 	m.fired.connect(_on_mob_fired)
 	m.exploded.connect(_on_mob_exploded)
 	m.used.connect(_on_mob_used)
+	m.net_id = _next_net_id
+	_next_net_id += 1
 	mobs.append(m)
+	# tell the clients a mob appeared, so they can show the same body. Guarded inside,
+	# so single player and the client side of it pay nothing.
+	if _net_is_host():
+		Net.announce_mob_spawn(int(m.net_id), kind, pos)
 	return m
 
 
 ## Spawn a specific mob at a spot (used by the preview pass and the tests).
 func spawn_at(kind: String, pos: Vector3):
 	return _spawn(kind, pos)
+
+
+## Whether this machine owns the mob population -- and therefore makes the spawning
+## decisions. True in single player and on the host; false for a client, which only
+## draws the bodies it is told about. This is the one gate the whole spawner sits behind.
+func local_spawning_enabled() -> bool:
+	return not Net.is_active() or Net.role == Net.Role.HOST
+
+
+func _net_is_host() -> bool:
+	return Net.is_active() and Net.role == Net.Role.HOST
+
+
+## The host telling us one of its mobs took a hit.
+func report_hurt(m) -> void:
+	if _net_is_host():
+		Net.announce_mob_hurt(int(m.net_id))
+
+
+## The host telling us one of its mobs died.
+func report_died(m) -> void:
+	if _net_is_host():
+		Net.announce_mob_died(int(m.net_id))
+
+
+## The mob with this net id, or null. Replication addresses mobs by id, not by identity.
+func mob_with_id(net_id: int):
+	for m in mobs:
+		if is_instance_valid(m) and int(m.net_id) == net_id:
+			return m
+	return null
+
+
+## The host spawned a mob: build a body for it here. It runs no AI and drops nothing --
+## that is the host's business -- so it is a remote mob.
+func replicate_spawn(net_id: int, kind: String, pos: Vector3):
+	var existing = mob_with_id(net_id)
+	if existing != null:
+		return existing
+	var m = _spawn(kind, pos)
+	m.remote = true
+	m.net_id = net_id
+	return m
+
+
+## The host killed a mob: take the body away. The drop is the host's, so nothing falls
+## here, and the death is not re-reported.
+func replicate_died(net_id: int) -> void:
+	for i in range(mobs.size() - 1, -1, -1):
+		var m = mobs[i]
+		if is_instance_valid(m) and int(m.net_id) == net_id:
+			m.queue_free()
+			mobs.remove_at(i)
+
+
+## The host hit a mob: flash the body so the hit is visible here.
+func replicate_hurt(net_id: int) -> void:
+	var m = mob_with_id(net_id)
+	if m != null:
+		m._hurt_t = 0.28
+		m._flash()
 
 
 ## Which trade a villager standing at `pos` keeps. Read off the column it stands in, so
@@ -106,6 +180,12 @@ func update(player_pos: Vector3, delta: float, night: bool = false) -> void:
 	for m in mobs:
 		if not is_instance_valid(m):
 			continue
+		# a remote body is only drawn here: it runs no AI, it never despawns on our
+		# distance, it only keeps its hit flash ticking down
+		if m.remote:
+			m.tick_remote(delta)
+			alive.append(m)
+			continue
 		if not m.tamed and m.global_position.distance_to(player_pos) > DESPAWN:
 			m.queue_free()
 			continue
@@ -118,6 +198,10 @@ func update(player_pos: Vector3, delta: float, night: bool = false) -> void:
 	_timer -= delta
 	if _timer <= 0.0:
 		_timer = randf_range(1.2, 3.0)
+		# the spawner is the host's (or single player's) alone. A client never rolls a
+		# mob of its own -- it only ever shows the bodies the host hands it.
+		if not local_spawning_enabled():
+			return
 		if _count_kind(false) < MAX_PASSIVE:
 			_try_spawn(player_pos, false)
 		# hostiles only appear at night, or deep underground where it is dark anyway
@@ -200,6 +284,14 @@ func _try_spawn_trader(player_pos: Vector3) -> void:
 		return
 
 
+## The hostiles the current dimension spawns. The overworld and the nether keep separate
+## rosters, and the spawner reads the one that matches the world it is running in.
+func hostile_roster() -> Array:
+	if world != null and world.dimension == 1:
+		return NETHER
+	return HOSTILE
+
+
 func _count_kind(hostile: bool) -> int:
 	var n := 0
 	for m in mobs:
@@ -222,7 +314,7 @@ func _tick_environment(m, delta: float, night: bool) -> void:
 
 
 func _try_spawn(player_pos: Vector3, hostile: bool) -> void:
-	var list: Array = HOSTILE if hostile else PASSIVE
+	var list: Array = hostile_roster() if hostile else PASSIVE
 	for attempt in 8:
 		var ang := randf() * TAU
 		var dist := randf_range(SPAWN_MIN, SPAWN_MAX)
@@ -278,7 +370,7 @@ func _try_spawn_wolf(player_pos: Vector3) -> void:
 func _tick_breeding(delta: float) -> void:
 	var ready: Array = []
 	for m in mobs:
-		if not is_instance_valid(m):
+		if not is_instance_valid(m) or m.remote:
 			continue
 		m.love_t = maxf(0.0, m.love_t - delta)
 		if m.love_t > 0.0 and not m.baby and BREEDABLE.has(str(m.kind)):
@@ -312,7 +404,7 @@ func raycast_mob(origin: Vector3, dir: Vector3, reach: float):
 	var best = null
 	var best_t := reach
 	for m in mobs:
-		if not is_instance_valid(m):
+		if not is_instance_valid(m) or m.remote:
 			continue
 		var to: Vector3 = m.global_position + Vector3(0, float(m._h) * 0.5, 0) - origin
 		var t: float = to.dot(dir)
