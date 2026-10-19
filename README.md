@@ -285,6 +285,11 @@ with **nether quartz ore** — the dimension's own reward for digging. The sky i
 with no sun, no moon and no rain, and eight blocks walked here are one block of overworld
 distance, so the two doors stay paired.
 
+The nether keeps its own inhabitants: **pigmen**, which close in and drop rotten flesh and
+gold nuggets, and **blazes**, which lob fire from a distance. Neither is afraid of the sun
+— there is no sun here — and nothing from the overworld wanders in, so each dimension rolls
+its own roster. Killing a pigman earns a milestone of its own.
+
 Everything on each side is kept apart: a chest in the nether and a chest at the same
 coordinates in the overworld are different chests, and so are their wire, their fluid and
 their facings. Travel back and forth as often as you like — the save keeps both dimensions
